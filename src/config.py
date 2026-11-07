@@ -122,6 +122,16 @@ COMPLIANCE_LOCKED_FIELDS: tuple[str, ...] = tuple(COMPLIANCE_FIXED)
 # V1 p.3 / V2 §11 命名规范：<ECU name>_<serial number>_<sequential number>
 # {seq} 为 4 位序号（V1 示例 0001）；{ecu}/{serial} 由操作人员在界面填写，程序不预填，
 # 避免把 OCR 误差或猜测值写进客户交付文件名。
+# 样品编号（客户规范的 <serial number>）：B118X / B119X 段位于串内、顺序不可变更。
+# 程序只把操作人员填写的编号原样拼进文件名——不截断、不重排、不改大小写，
+# 也不做任何“补前缀/补后缀”的推断（铭牌与文档示例存在 B118X/B119X 差异，猜测会写错客户文件名）。
+SERIAL_FULL_EXAMPLE = "T55B92BD20126B118X0000119461114"
+SERIAL_MARK_RE = re.compile(r"B\d{3}X")
+SERIAL_HINT = ("样品编号须填完整串（含 B118X / B119X 段，顺序不可变更），"
+               f"例 {SERIAL_FULL_EXAMPLE}")
+SERIAL_MIN_LEN = 20   # 含 B 段的完整样品编号实测 31 位；明显偏短时只提示、不阻断
+SERIAL_SHORT_HINT = "编号偏短（{n} 位），请确认是否含完整尾段（不阻断处理）"
+
 FILENAME_TEMPLATE_PRESETS: list[tuple[str, str]] = [
     ("{ecu}_{serial}_{seq}", "{ecu}_{serial}_{seq}（客户合规命名，默认）"),
     ("{name}_结果", "{name}_结果（V2 步骤 3.9 界面示例，仅归档用）"),

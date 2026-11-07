@@ -20,6 +20,10 @@ from PIL import Image  # noqa: F401  (确保打包时 PIL 被收集)
 from . import __app_name__, __spec_source__, __version__
 from .config import (
     COMPLIANCE_FIXED,
+    SERIAL_HINT,
+    SERIAL_MARK_RE,
+    SERIAL_MIN_LEN,
+    SERIAL_SHORT_HINT,
     FILENAME_TEMPLATE_PRESETS,
     ON_EXISTS,
     OUTPUT_FORMATS,
@@ -279,13 +283,18 @@ class App(tk.Tk):
         row1 = ttk.Frame(box)
         row1.pack(fill="x")
         self._required_field(row1, "ecu_name", "★ ECU 名称", 26)
-        self._required_field(row1, "serial_number", "★ 样品序列号", 30)
+        self._required_field(row1, "serial_number", "★ 样品编号（完整串）", 30)
         self._required_field(row1, "output_dir", "★ 输出目录", 46, browse=True)
         ttk.Label(row1, text="起始序号").pack(side="left", padx=(10, 3))
         var = tk.StringVar()
         self.vars["start_index"] = var
         self.widgets["start_index"] = ttk.Entry(row1, textvariable=var, width=6)
         self.widgets["start_index"].pack(side="left")
+
+        row_hint = ttk.Frame(box)
+        row_hint.pack(fill="x", pady=(4, 0))
+        self.serial_hint = ttk.Label(row_hint, text=SERIAL_HINT, foreground="#5F6B7A")
+        self.serial_hint.pack(side="left")
 
         row2 = ttk.Frame(box)
         row2.pack(fill="x", pady=(9, 0))
@@ -348,6 +357,20 @@ class App(tk.Tk):
         if hasattr(self, "btn_start"):
             self.btn_start.configure(
                 state="normal" if filled == total and not self.busy else "disabled")
+        # 样品编号完整性提示：只提示、不阻断（V1 示例 2718281828 本身不含 B 段，硬拦会误伤）
+        hint = getattr(self, "serial_hint", None)
+        if hint is not None:
+            serial_var = self.vars.get("serial_number")
+            serial = "" if serial_var is None else str(serial_var.get()).strip()
+            # 只对「含 B 段但明显偏短」的编号提醒（疑似漏了尾段）；
+            # 不含 B 段的编号不告警——V1 官方示例 2718281828 就是这种格式。
+            short_with_mark = (serial and SERIAL_MARK_RE.search(serial)
+                               and len(serial) < SERIAL_MIN_LEN)
+            if short_with_mark:
+                hint.configure(text=SERIAL_SHORT_HINT.format(n=len(serial)),
+                               foreground="#9A5B00")
+            else:
+                hint.configure(text=SERIAL_HINT, foreground="#5F6B7A")
 
     def _focus_first_required(self) -> None:
         for key in REQUIRED_FIELDS:
