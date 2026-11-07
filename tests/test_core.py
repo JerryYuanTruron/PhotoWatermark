@@ -587,20 +587,23 @@ def main() -> int:
           all(g is not None and g.rotation == "manual" for g in other_ori), "")
 
     ratio_cases = [
-        ("K7 竖版且比例不符", geo_img("P_BAD.jpg", 900, 1600), "portrait_ratio"),
-        ("K8 横版但比例不符", geo_img("L_BAD.jpg", 1600, 900), "landscape_ratio"),
-        ("K9 正方形比例不符", geo_img("S_BAD.jpg", 1000, 1000), "square"),
+        ("K7 竖版且比例不符", geo_img("P_BAD.jpg", 900, 1600), "portrait_ratio",
+         ("仍会照常处理", "裁剪", "更换")),
+        ("K8 横版但比例不符", geo_img("L_BAD.jpg", 1600, 900), "landscape_ratio",
+         ("自动居中裁边为 1200×900", "左右各裁 200 px", "无需手工调整", "无需")),
+        ("K9 正方形比例不符", geo_img("S_BAD.jpg", 1000, 1000), "square",
+         ("仍会照常处理", "裁剪", "更换")),
         ("K9b 真实规格 8768×6144 判为横版比例不符",
-         geo_img("REAL.jpg", 8768, 6144), "landscape_ratio"),
+         geo_img("REAL.jpg", 8768, 6144), "landscape_ratio",
+         ("自动居中裁边为 8192×6144", "左右各裁 288 px", "无需手工调整")),
     ]
     ratio_issues = []
-    for label, path, kind in ratio_cases:
+    for label, path, kind, words in ratio_cases:
         g = engine.check_geometry(path)
         ratio_issues.append(g)
-        check(label + "：仅旋转无法修正并提示裁剪/更换",
+        check(label + "：说明自动处理方式、不需要人工改图",
               g is not None and g.kind == kind
-              and all(w in g.advice for w in ("仅旋转无法修正比例", "裁剪", "更换", "4:3")),
-              g.brief if g else "")
+              and all(w in g.advice for w in words), g.brief if g else "")
 
     broken_geo = gd / "BROKEN.jpg"
     broken_geo.write_bytes(b"\xff\xd8\xff\xe0" + b"garbage" * 20)
@@ -614,11 +617,14 @@ def main() -> int:
           all(n in notice for n in (pm.name, "P_CW.jpg", "L_BAD.jpg", "BROKEN.jpg"))
           and "竖版" in notice and "横版" in notice
           and "目标要求：符合 4:3 的横版照片" in notice
+          and "仍会照常批量处理，无需手工调整或单独处理" in notice
           and "不阻断导入" in notice, "")
     banned_geo = ("微信", "截图", "传输", "APP1", "剥离", "来源", "推断", "诊断")
-    check("K12 提示文案纯净、简洁、无来源类信息",
+    check("K12 提示文案纯净、无「需自行处理」歧义",
           all(w not in notice for w in banned_geo)
-          and "程序不指定方向" in notice and "仅旋转无法修正比例" in notice, "")
+          and "程序不指定方向" in notice
+          and "自动居中裁边" in notice
+          and "请裁剪或更换为符合 4:3 的横版文件" not in notice, "")
     # 文件名不得影响判定（防止用文件名或来源类信息替代像素尺寸判断）
     check("K13 判定只依据像素尺寸，不依据文件名",
           engine.check_geometry(geo_img("名为竖版实则横版.jpg", 1200, 900)) is None

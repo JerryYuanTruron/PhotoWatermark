@@ -47,7 +47,7 @@ def main() -> int:
 
     messagebox.askyesno = ask_yes  # type: ignore[assignment]
     # 记录比例/方向提示窗口的调用（不真正弹窗，便于无人值守断言）
-    ui.show_geometry_notice = lambda parent, issues: (
+    ui.show_geometry_notice = lambda parent, issues, crop43=True: (
         GEOMETRY_CALLS.append(list(issues)) or None)
 
     # 每次运行用唯一空目录，不做批量删除（避免触发删除授权，详见 tests/_testfs.py）
@@ -204,6 +204,8 @@ def main() -> int:
     vert = geo_sample("VERT_34.jpg", 900, 1200)
     wide = geo_sample("WIDE_169.jpg", 1600, 900)
     app._clear_files()
+    # 用默认的 crop43 口径验证文案：横版会被自动裁边，不应出现「请自行处理」的说法
+    app.widgets["resize_mode"].set_value("crop43")
     GEOMETRY_CALLS.clear()
     POPUPS.clear()
     app._merge_files([str(ok43)])
@@ -218,14 +220,18 @@ def main() -> int:
     text = engine.geometry_notice_text(issues)
     assert len(issues) == 2 and all(x.filename in text for x in issues)
     assert "目标要求：符合 4:3 的横版照片" in text
+    assert "仍会照常批量处理，无需手工调整或单独处理" in text
     assert "竖版" in text and "横版" in text
     assert "程序不指定方向" in text and "人工确认" in text
-    assert "仅旋转无法修正比例" in text and "裁剪或更换" in text
+    assert "自动居中裁边" in text and "无需手工调整" in text
+    assert "仅旋转无法修正比例" not in text and "请裁剪或更换" not in text
     assert "不阻断导入" in text
     assert len(app.files) == 3 and ok43.name in [Path(f).name for f in app.files]
     statuses = [app.tree.item(str(i), "values")[3] for i in range(1, 4)]
-    assert statuses == ["待处理", "比例异常", "比例异常"], statuses
-    print("[10b] 提示列出受影响文件 / 异常类型 / 目标要求；合格照片仍照常导入")
+    assert statuses == ["待处理", "比例提示", "自动裁边"], statuses
+    stages = [app.tree.item(str(i), "values")[4] for i in range(1, 4)]
+    assert stages == ["", "", ""], f"比例提示不应占用「失败阶段」列: {stages}"
+    print("[10b] 提示说明「仍会照常处理、无需人工」；状态列标自动裁边、不占失败阶段")
 
     # 重复导入不重复弹窗；清空后重新导入会再次提示
     app._merge_files([str(vert)])
