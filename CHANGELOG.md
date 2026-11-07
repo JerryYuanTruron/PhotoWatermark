@@ -5,6 +5,40 @@
 
 ---
 
+## [1.1.1] - 2026-11-07
+
+按操作人员使用要求，收敛「缺少 EXIF」的触发与提示行为。
+
+### 修正
+
+- **触发条件唯一化**：新增 `has_exif_capture_time()`，仅读取照片 EXIF 的
+  `DateTimeOriginal` / `DateTimeDigitized` / `DateTime`；三者均不可用时视为缺少 EXIF 信息。
+  不读取文件名、文件时间、JPEG 其它数据段，也不受任何配置项影响
+  （移除 `precheck_exif` 与 `diagnose_app1_time` 两个会影响触发的开关）。
+  **含 EXIF 的照片不触发提示**，包括命中字段为 `DateTime` 的情形，仍按原流程正常处理。
+- **删除来源类诊断**：移除 `diagnose_app1_capture_time()`、`APP1_TIME_PATTERN` 及其在失败原因中的
+  诊断文案；不再从文件其它数据段推断时间，也不用任何来源类信息替代 EXIF 判断。
+- **统一提示窗口**：缺少 EXIF 时调用 `messagebox.showwarning` 弹出窗口，标题与文案由
+  `EXIF_NOTICE_TITLE` / `EXIF_NOTICE_MESSAGE` 统一提供：
+  「缺少 EXIF 信息。请提供保留完整 EXIF 的原始照片。」
+  文案简洁、无歧义，不含数量、诊断、技术细节或任何照片来源类信息。
+  导入预检与开始处理前各按同一条件复核，已提示过的照片不重复弹窗。
+- **不静默跳过**：除弹窗外，状态表标记「缺少 EXIF」、该张判失败并写入失败清单；
+  处理报告建议统一为「请提供保留完整 EXIF 的原始照片」。
+- 运行时与 README 中全部来源类表述已清除；核查报告保留历史数据取证记录并加注说明
+  （该记录非运行时提示文案）。
+
+### 验证（全量）
+
+- 核心测试新增/更新：纯 EXIF 触发、含 EXIF（含仅 `DateTime`）不触发、文案纯净性、
+  来源类能力已移除、缺 EXIF 判失败且原因统一。
+- GUI 冒烟新增：记录弹窗调用，断言「含 EXIF 不弹窗」「缺 EXIF 弹窗一次且文案精确一致」
+  「状态表标记」「处理前复核不重复弹窗」。
+- 冻结产物 `--selftest` 新增 4 项行为标记（`exif_only_trigger` / `notice_clean` /
+  `no_source_diagnostics` / `precheck_uses_uniform_text`），验收脚本逐项核对。
+
+---
+
 ## [1.1.0] - 2026-11-07
 
 依据客户 V1 规范 `How to_ photo documentation-v1-20260515_075710.pdf`（CONFIDENTIAL，2026/05/15）

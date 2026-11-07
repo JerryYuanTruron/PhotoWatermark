@@ -189,7 +189,7 @@ def main() -> int:
     check("E1 正常照片成功", rs[0].status == engine.STATUS_SUCCESS)
     check("E2 缺 EXIF → 时间源阶段失败",
           rs[1].status == engine.STATUS_FAILED and rs[1].stage == engine.STAGE_TIME
-          and "EXIF 拍摄日期" in rs[1].reason)
+          and "缺少 EXIF 信息" in rs[1].reason)
     check("E3 损坏图 → 导入阶段失败",
           rs[2].status == engine.STATUS_FAILED and rs[2].stage == engine.STAGE_IMPORT
           and "解码失败" in rs[2].reason)
@@ -281,7 +281,7 @@ def main() -> int:
     csv_text = csv_bytes.decode("utf-8-sig")
     check("G3 失败清单 CSV 含 UTF-8 BOM 与失败项",
           csv_bytes.startswith(b"\xef\xbb\xbf") and "NOEXIF_0004.jpg" in csv_text
-          and "缺少 EXIF 拍摄日期" in csv_text)
+          and "缺少 EXIF 信息" in csv_text)
     payload = json.loads(Path(paths["处理报告JSON"]).read_text(encoding="utf-8"))
     # 版本期望值从源码读取，断言「报告版本 == 源码声明版本」这一跨版本恒真关系，
     # 不写死 1.0.0/1.1.0（升版即假红）。
@@ -461,25 +461,44 @@ def main() -> int:
     check("J7 命名 token 未留字面量占位符",
           "{" not in Path(rn.output_path).name, rn.output_path)
 
-    # 构造「微信改写主 IFD、EXIF 时间被剥离但 APP1 残留相机时间」的合成样本
-    wx_dir = fresh("wechat_like")
-    wx = wx_dir / "wechat_like.jpg"
-    Image.new("RGB", (64, 48), (100, 120, 140)).save(wx, format="JPEG", quality=90)
-    raw = wx.read_bytes()
+    # 构造「EXIF 块存在但无拍摄日期字段、且数据区残留时间字符串」的样本：
+    # 用于验证触发判断只看 EXIF 字段，不因残留数据而误判为「含 EXIF」。
+    ex_dir = fresh("exif_missing")
+    ex = ex_dir / "no_exif_time.jpg"
+    Image.new("RGB", (64, 48), (100, 120, 140)).save(ex, format="JPEG", quality=90)
+    raw = ex.read_bytes()
     tiff = (b"MM\x00*\x00\x00\x00\x08" + b"\x00\x00" + b"\x00\x00\x00\x00"
             + b"2026:11:02 15:52:21\x00")
     app1_payload = b"Exif\x00\x00" + tiff
     seg = b"\xff\xe1" + struct.pack(">H", len(app1_payload) + 2) + app1_payload
-    wx.write_bytes(raw[:2] + seg + raw[2:])
-    check("J8 预检识别剥离 EXIF 的照片",
-          "缺少 EXIF 拍摄日期" in engine.precheck_exif(wx), engine.precheck_exif(wx))
-    check("J9 正常照片预检通过", engine.precheck_exif(good) == "", engine.precheck_exif(good))
-    recovered = engine.diagnose_app1_capture_time(wx)
-    check("J10 可诊断 APP1 残留相机时间", recovered == "2026:11:02 15:52:21", recovered)
-    cfg_wx = C(output_dir=str(wx_dir / "out"), missing_exif_policy="fail")
-    rw = run([wx], cfg_wx)[0]
-    check("J11 残留时间仅作诊断，绝不用于水印",
-          rw.status == engine.STATUS_FAILED and "APP1 残留相机时间" in rw.reason
+    ex.write_bytes(raw[:2] + seg + raw[2:])
+    check("J8 触发判断只依据 EXIF：缺拍摄日期即触发",
+          not engine.has_exif_capture_time(ex)
+          and engine.precheck_exif(ex) == engine.EXIF_MISSING_REASON,
+          engine.precheck_exif(ex))
+    check("J9 含 EXIF 的照片不触发",
+          engine.has_exif_capture_time(good) and engine.precheck_exif(good) == "",
+          engine.precheck_exif(good))
+    # 含 EXIF 但命中字段不是 DateTimeOriginal：仍属「含 EXIF」，不得触发提示
+    only_dt = by_name["PeCu_2718281828_0002.jpg"]
+    check("J9b 含 EXIF(仅 DateTime)也不触发",
+          engine.has_exif_capture_time(only_dt) and engine.precheck_exif(only_dt) == "",
+          engine.precheck_exif(only_dt))
+    banned = ("微信", "截图", "传输", "APP1", "剥离", "来源", "推断", "诊断")
+    check("J10 提示文案简洁且不含来源类信息",
+          "EXIF" in engine.EXIF_NOTICE_MESSAGE
+          and "原始照片" in engine.EXIF_NOTICE_MESSAGE
+          and all(w not in engine.EXIF_NOTICE_MESSAGE for w in banned)
+          and all(w not in engine.EXIF_NOTICE_TITLE for w in banned)
+          and all(w not in engine.EXIF_MISSING_REASON for w in banned),
+          engine.EXIF_NOTICE_MESSAGE)
+    check("J10b 已移除来源类诊断能力",
+          not hasattr(engine, "diagnose_app1_capture_time"), "")
+    cfg_wx = C(output_dir=str(ex_dir / "out"), missing_exif_policy="fail")
+    rw = run([ex], cfg_wx)[0]
+    check("J11 缺 EXIF 不静默跳过：判失败、无成品、原因统一",
+          rw.status == engine.STATUS_FAILED and rw.stage == engine.STAGE_TIME
+          and rw.reason == engine.EXIF_MISSING_REASON
           and rw.watermark_text == "" and rw.output_path == "",
           f"{rw.status} {rw.reason[:110]}")
 
