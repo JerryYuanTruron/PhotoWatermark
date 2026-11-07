@@ -3,11 +3,10 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
-# ---- 运行时生成 ----
+# ---- 运行时 / 自测生成（项目根下所有 _ 前缀临时目录与文件）----
+/_*
 rules/last_used.json
 logs/
-_output/
-_test_out/
 *.log
 
 # ---- 构建中间产物（dist 内的交付 exe 需入库，故只忽略目录内通配内容）----
