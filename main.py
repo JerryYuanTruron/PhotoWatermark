@@ -81,7 +81,7 @@ def _selftest(workdir: str) -> int:
             return ex.tobytes()
 
         p1 = work / "SAMPLE_0001.jpg"
-        pic(1200, 900).save(p1, quality=95, exif=exif_bytes("2026:05:22 16:29:01"))
+        pic(2400, 1800).save(p1, quality=95, exif=exif_bytes("2026:05:22 16:29:01"))
         p2 = work / "NOEXIF_0002.jpg"
         pic(800, 600).save(p2, quality=95)
         p3 = work / "BROKEN_0003.jpg"
@@ -177,6 +177,38 @@ def _selftest(workdir: str) -> int:
            and all(n in gnotice for n in (p4.name, p5.name))
            and "不阻断导入" in gnotice, "")
 
+        # v1.4.0：水印字号放大到 3 倍 + 按每张照片背景自动取色（不固定白色）
+        ck("watermark_font_tripled",
+           config.WATERMARK_FIXED["font_size"] == 210,
+           config.WATERMARK_FIXED["font_size"])
+        ck("watermark_ink_auto",
+           config.WATERMARK_FIXED["font_color"] == "auto"
+           and config.WATERMARK_FIXED["shadow_color"] == "auto", "")
+        ink_out = work / "ink_output"
+        ink_out.mkdir(parents=True, exist_ok=True)
+        cfg_ink = config.RuleConfig()
+        cfg_ink.output_dir = str(ink_out)
+        cfg_ink.ecu_name = "EEPH"
+        cfg_ink.serial_number = "SELFTEST"
+        cfg_ink.min_output_megapixels = 0
+        p_light = work / "INK_LIGHT_0007.jpg"
+        Image.new("RGB", (2400, 1800), (245, 245, 245)).save(
+            p_light, quality=95, exif=exif_bytes("2026:05:22 16:29:01"))
+        p_dark = work / "INK_DARK_0008.jpg"
+        Image.new("RGB", (2400, 1800), (12, 12, 12)).save(
+            p_dark, quality=95, exif=exif_bytes("2026:05:22 16:29:01"))
+        r_light = engine.process_one(p_light, cfg_ink, 1, set())
+        r_dark = engine.process_one(p_dark, cfg_ink, 2, set())
+        ck("watermark_light_bg_dark_ink",
+           r_light.ok and r_light.watermark_color == "#101010",
+           f"{r_light.status} {r_light.watermark_color}")
+        ck("watermark_dark_bg_light_ink",
+           r_dark.ok and r_dark.watermark_color == "#FAFAFA",
+           f"{r_dark.status} {r_dark.watermark_color}")
+        ck("watermark_contrast_ok",
+           min(r_light.watermark_contrast, r_dark.watermark_contrast) >= 150,
+           f"{r_light.watermark_contrast:.0f}/{r_dark.watermark_contrast:.0f}")
+
         used: set[str] = set()
         started = datetime.now()
         rs = [engine.process_one(p, cfg, i, used) for i, p in enumerate((p1, p2, p3), 1)]
@@ -212,7 +244,7 @@ def _selftest(workdir: str) -> int:
            [x.name for x in produced])
         if produced:
             with Image.open(produced[0]) as im:
-                ck("output_size", im.size == (1200, 900), im.size)  # 保持原尺寸
+                ck("output_size", im.size == (2400, 1800), im.size)  # 保持原尺寸
                 dpi = im.info.get("dpi")
                 ck("output_dpi", dpi is not None and abs(dpi[0] - 300) < 2, dpi)
                 ck("exif_preserved",

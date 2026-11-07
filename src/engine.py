@@ -17,7 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, UnidentifiedImageError
+from PIL import (Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps,
+                 ImageStat, UnidentifiedImageError)
 
 from .config import (
     POSITIONS,
@@ -58,6 +59,13 @@ POS_ANCHORS = {
 ILLEGAL_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]')
 MAX_FILENAME_CHARS = 120          # 单文件名上限，避免 Windows 260 字符路径限制
 MIN_VISIBLE_WM_PIXELS = 20        # 水印区域至少要有这么多个像素被明显改变
+
+# --------------------------------------------------------------------------
+# 时间水印取色：按每张照片的背景自动选择墨色，不使用固定白色
+# --------------------------------------------------------------------------
+WM_INK_DARK = (16, 16, 16)        # 浅色/同色背景用深墨
+WM_INK_LIGHT = (250, 250, 250)    # 深色背景用浅墨
+WM_MIN_INK_CONTRAST = 60.0        # 文字与底层背景的实测平均亮度差下限（0–255）
 
 # 缺少 EXIF 时面向操作人员的统一提示。
 # 约束：只说明「缺 EXIF」与「提供保留完整 EXIF 的原始照片」，
@@ -179,6 +187,8 @@ class ProcessResult:
     output_size: str = ""
     capture_time: str = ""
     watermark_text: str = ""
+    watermark_color: str = ""          # 自动取色的实际墨色（#RRGGBB）
+    watermark_contrast: float = 0.0    # 字形区域与底层的实测平均亮度差（0–255）
     warnings: list[str] = field(default_factory=list)
     duration_ms: int = 0
     verified: bool = False
@@ -207,6 +217,8 @@ class ProcessResult:
             "报告版副本": Path(self.report_copy_path).name if self.report_copy_path else "",
             "拍摄时间": self.capture_time,
             "水印内容": self.watermark_text,
+            "水印颜色(自动)": self.watermark_color,
+            "水印对比度": round(self.watermark_contrast, 1) if self.watermark_color else "",
             "输出文件": self.output_path,
             "输出校验": "通过" if self.verified else ("未执行" if self.ok else "—"),
             "耗时(ms)": self.duration_ms,
@@ -557,13 +569,116 @@ def _load_font(cfg: RuleConfig, text: str, canvas_w: int) -> tuple[ImageFont.Fre
     return font, tw, th, shrunk
 
 
+def _median_luma(img: Image.Image) -> int:
+    """区域背景亮度的中位数（0–255）。用灰度直方图统计，不做逐像素 Python 循环。"""
+    hist = img.convert("L").histogram()
+    total = sum(hist)
+    if not total:
+        return 128
+    half = total / 2.0
+    acc = 0
+    for value, count in enumerate(hist):
+        acc += count
+        if acc >= half:
+            return value
+    return 255
+
+
+def _wcag_luminance(rgb: tuple[int, int, int]) -> float:
+    def channel(v: int) -> float:
+        c = v / 255.0
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (channel(v) for v in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_ratio(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
+    """WCAG 对比度（1–21）。用于在深墨/浅墨之间做选择。"""
+    la, lb = _wcag_luminance(a), _wcag_luminance(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def pick_watermark_ink(base: Image.Image, rect: tuple[int, int, int, int]) -> tuple[int, int, int]:
+    """按水印区域背景的中位亮度，在深墨/浅墨之间选对比度更高的一种。
+
+    不使用固定白色：浅色背景取深墨、深色背景取浅墨；背景色与水印色接近
+    （同色背景）时会自动切到差异更大的一侧。
+    """
+    med = _median_luma(base.crop(rect))
+    bg = (med, med, med)
+    return (WM_INK_DARK
+            if contrast_ratio(WM_INK_DARK, bg) >= contrast_ratio(WM_INK_LIGHT, bg)
+            else WM_INK_LIGHT)
+
+
+def _compose_watermark(
+    base: Image.Image, cfg: RuleConfig, text: str, font: ImageFont.FreeTypeFont,
+    x: int, y: int, tw: int, th: int,
+    ink: tuple[int, int, int], shadow_rgb: tuple[int, int, int],
+) -> tuple[Image.Image, tuple[int, int, int, int], float]:
+    """按指定墨色/阴影色渲染并合成，返回 (输出图, 文字矩形, 字形区域实测亮度差)。"""
+    W, H = base.size
+    # 性能优化：只在水印局部区域（含阴影/模糊外扩）建 RGBA 图层。
+    # 对整张画布做 GaussianBlur 与 alpha_composite 会让单张处理慢 1 个数量级。
+    pad = 4 + cfg.shadow_blur * 3
+    px0 = max(0, x - abs(cfg.shadow_offset_x) - pad)
+    py0 = max(0, y - abs(cfg.shadow_offset_y) - pad)
+    px1 = min(W, x + tw + abs(cfg.shadow_offset_x) + pad)
+    py1 = min(H, y + th + abs(cfg.shadow_offset_y) + pad)
+    lw, lh = px1 - px0, py1 - py0
+    lx, ly = x - px0, y - py0
+
+    layer = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
+    if cfg.shadow_enabled and cfg.shadow_opacity > 0:
+        shadow = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
+        ImageDraw.Draw(shadow).text(
+            (lx + cfg.shadow_offset_x, ly + cfg.shadow_offset_y), text, font=font,
+            fill=shadow_rgb + (round(255 * cfg.shadow_opacity / 100),), anchor="lt")
+        if cfg.shadow_blur > 0:
+            shadow = shadow.filter(ImageFilter.GaussianBlur(cfg.shadow_blur))
+        layer = Image.alpha_composite(layer, shadow)
+
+    draw = ImageDraw.Draw(layer)
+    kwargs: dict[str, Any] = {}
+    if cfg.bold:
+        kwargs = {"stroke_width": max(1, font.size // 40),
+                  "stroke_fill": ink + (round(255 * cfg.font_opacity / 100),)}
+    draw.text((lx, ly), text, font=font,
+              fill=ink + (round(255 * cfg.font_opacity / 100),), anchor="lt", **kwargs)
+    if layer.getbbox() is None:
+        raise RuntimeError("水印图层为空，渲染失败")
+
+    out = base.copy()
+    region = Image.alpha_composite(out.crop((px0, py0, px1, py1)).convert("RGBA"), layer)
+    out.paste(region.convert("RGB"), (px0, py0))
+
+    # 文字蒙版（仅字形、不含阴影）：只统计「字压住的那部分背景」的亮度差，
+    # 避免把大片空白区域计入而高估可读性。
+    mask = Image.new("L", (lw, lh), 0)
+    ImageDraw.Draw(mask).text((lx, ly), text, font=font, fill=255, anchor="lt")
+    before = base.crop((px0, py0, px1, py1)).convert("L")
+    after = out.crop((px0, py0, px1, py1)).convert("L")
+    delta = ImageChops.difference(before, after)
+    contrast = float(ImageStat.Stat(delta, mask=mask).mean[0])
+
+    rect = (x, y, min(W, x + tw), min(H, y + th))
+    return out, rect, contrast
+
+
 def _stage_watermark(
     base: Image.Image, cfg: RuleConfig, text: str
-) -> tuple[Image.Image, tuple[int, int, int, int] | None, list[str]]:
-    """时间水印渲染：位置 / 字体 / 字号 / 颜色 / 不透明度 / 阴影（文档 3.7、3.8）。"""
+) -> tuple[Image.Image, tuple[int, int, int, int] | None, list[str], str, float]:
+    """时间水印渲染：位置 / 字号 / 自动取色 / 不透明度 / 阴影。
+
+    位置与排版固定（右下、固定边距、单行）；字号为系统固定的 210 px（原 70 px 的 3 倍），
+    颜色按每张照片水印区域的背景自动在深墨/浅墨之间选择，不使用固定白色，
+    浅色或与文字同色的背景也能保持清晰可读。
+    """
     warnings: list[str] = []
     if not cfg.watermark_enabled or not text:
-        return base, None, warnings
+        return base, None, warnings, "", 0.0
     # 运行期也拦截（引擎可被命令行/测试直接调用，不经过 config.validate）
     if cfg.font_opacity < 1:
         raise RuntimeError("字体不透明度为 0：文字不可见（仅阴影可见），不满足可见时间戳要求")
@@ -589,41 +704,26 @@ def _stage_watermark(
     if rect[2] <= rect[0] or rect[3] <= rect[1]:
         raise RuntimeError("画布过小，水印文本无可绘制区域（请增大目标尺寸或缩小字号）")
 
-    # 性能优化：只在水印局部区域（含阴影/模糊外扩）建 RGBA 图层。
-    # 对整张画布做 GaussianBlur 与 alpha_composite 会让单张处理慢 1 个数量级。
-    pad = 4 + cfg.shadow_blur * 3
-    px0 = max(0, x - abs(cfg.shadow_offset_x) - pad)
-    py0 = max(0, y - abs(cfg.shadow_offset_y) - pad)
-    px1 = min(W, x + tw + abs(cfg.shadow_offset_x) + pad)
-    py1 = min(H, y + th + abs(cfg.shadow_offset_y) + pad)
-    lw, lh = px1 - px0, py1 - py0
-    lx, ly = x - px0, y - py0
+    auto_ink = cfg.font_color.strip().lower() == "auto"
+    ink = pick_watermark_ink(base, rect) if auto_ink else hex_to_rgb(cfg.font_color)
+    if cfg.shadow_color.strip().lower() == "auto":
+        shadow_rgb = WM_INK_LIGHT if ink == WM_INK_DARK else WM_INK_DARK
+    else:
+        shadow_rgb = hex_to_rgb(cfg.shadow_color)
 
-    layer = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
-    if cfg.shadow_enabled and cfg.shadow_opacity > 0:
-        shadow = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
-        sd = ImageDraw.Draw(shadow)
-        sc = hex_to_rgb(cfg.shadow_color)
-        sd.text((lx + cfg.shadow_offset_x, ly + cfg.shadow_offset_y), text, font=font,
-                fill=sc + (round(255 * cfg.shadow_opacity / 100),), anchor="lt")
-        if cfg.shadow_blur > 0:
-            shadow = shadow.filter(ImageFilter.GaussianBlur(cfg.shadow_blur))
-        layer = Image.alpha_composite(layer, shadow)
+    out, rect, contrast = _compose_watermark(base, cfg, text, font, x, y, tw, th, ink, shadow_rgb)
+    # 自动取色的兜底：若按中位亮度选出的墨色在实际字形区域上对比度不足
+    # （例如文字横跨明暗交界），换另一侧墨色重算，取实测对比度更高的结果。
+    if auto_ink and contrast < WM_MIN_INK_CONTRAST:
+        alt = WM_INK_LIGHT if ink == WM_INK_DARK else WM_INK_DARK
+        alt_shadow = WM_INK_DARK if alt == WM_INK_LIGHT else WM_INK_LIGHT
+        alt_out, rect, alt_contrast = _compose_watermark(
+            base, cfg, text, font, x, y, tw, th, alt, alt_shadow)
+        if alt_contrast > contrast:
+            out, contrast, ink = alt_out, alt_contrast, alt
+    if contrast < WM_MIN_INK_CONTRAST:
+        warnings.append(f"水印与背景对比度偏低（平均亮度差 {contrast:.0f}），请人工确认该张可读性")
 
-    d = ImageDraw.Draw(layer)
-    fc = hex_to_rgb(cfg.font_color)
-    kwargs: dict[str, Any] = {}
-    if cfg.bold:
-        kwargs = {"stroke_width": max(1, font.size // 40), "stroke_fill": fc + (round(255 * cfg.font_opacity / 100),)}
-    d.text((lx, ly), text, font=font,
-           fill=fc + (round(255 * cfg.font_opacity / 100),), anchor="lt", **kwargs)
-
-    if layer.getbbox() is None:
-        raise RuntimeError("水印图层为空，渲染失败")
-
-    out = base.copy()
-    region = Image.alpha_composite(out.crop((px0, py0, px1, py1)).convert("RGBA"), layer).convert("RGB")
-    out.paste(region, (px0, py0))
     # 渲染有效性自检：水印区域必须发生「足量、肉眼可辨」的变化。
     # 只判 getbbox() 会被「文字全透明但有阴影」「1 像素差异」等配置绕过。
     diff = ImageChops.difference(base.crop(rect), out.crop(rect)).convert("L")
@@ -633,7 +733,8 @@ def _stage_watermark(
         raise RuntimeError(
             f"水印不可见或过淡（仅 {changed} 个像素发生可见变化，需要 ≥{need}）；"
             "请检查字体不透明度、字体色与水印内容")
-    return out, rect, warnings
+    ink_hex = "#{:02X}{:02X}{:02X}".format(*ink)
+    return out, rect, warnings, ink_hex, contrast
 
 
 def _save_image(img: Image.Image, path: Path, fmt: str, cfg: RuleConfig,
@@ -812,8 +913,11 @@ def process_one(source: str | Path, cfg: RuleConfig, seq: int,
         # --- 阶段 4：时间水印渲染（文档 3.5 / 3.7 / 3.8） ---
         if cfg.watermark_enabled:
             try:
-                image, rect, wm_warn = _stage_watermark(image, cfg, r.watermark_text)
+                image, rect, wm_warn, ink_hex, wm_contrast = _stage_watermark(
+                    image, cfg, r.watermark_text)
                 r.watermark_rect = rect
+                r.watermark_color = ink_hex
+                r.watermark_contrast = wm_contrast
                 r.warnings.extend(wm_warn)
             except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
                 return abort(STAGE_WATERMARK, f"水印渲染失败：{exc}")
@@ -878,7 +982,7 @@ def process_one(source: str | Path, cfg: RuleConfig, seq: int,
 
         downgrade = ("缺失 EXIF", "非 EXIF", "未执行输出回读校验", "未写入 EXIF",
                      "自动缩小", "回退到", "不足", "报告版导出失败", "报告版校验失败",
-                     "无法仅靠裁边")
+                     "无法仅靠裁边", "对比度偏低")
         r.status = STATUS_WARNING if any(
             any(k in w for k in downgrade) for w in r.warnings) else STATUS_SUCCESS
         return r

@@ -89,16 +89,16 @@ WATERMARK_FIXED: dict[str, Any] = {
     "margin_y": 20,
     "font_family": "微软雅黑",          # 文档 3.8 字体
     "font_path": "",
-    "font_size": 70,                  # 文档 3.8 尺寸 70
+    "font_size": 210,                 # 原 70 px 的 3 倍：高分辨率成品上仍清晰可读
     "font_size_unit": "px",
-    "font_color": "#FFFFFF",
+    "font_color": "auto",             # 按每张照片背景自动选深/浅墨色，不固定白色
     "font_opacity": 100,
     "bold": False,
     "shadow_enabled": True,           # 文档 3.8 阴影「启用」
-    "shadow_offset_x": 2,
-    "shadow_offset_y": 2,
-    "shadow_blur": 2,
-    "shadow_color": "#000000",
+    "shadow_offset_x": 6,             # 阴影随字号等比放大，保持原有衬托比例
+    "shadow_offset_y": 6,
+    "shadow_blur": 6,
+    "shadow_color": "auto",           # 与墨色相反，形成描边式衬托，保证同色背景可读
     "shadow_opacity": 70,
 }
 
@@ -166,16 +166,16 @@ class RuleConfig:
     margin_y: int = 20
     font_family: str = "微软雅黑"              # 3.8 字体
     font_path: str = ""                       # 空 = 按 font_family 自动解析
-    font_size: int = 70                       # 3.8 尺寸 70
+    font_size: int = 210                      # 原 70 px 的 3 倍
     font_size_unit: str = "px"                # px=输出图像素；pt=按 DPI 换算
-    font_color: str = "#FFFFFF"
+    font_color: str = "auto"                  # auto = 按每张照片背景自动取色（不固定白色）
     font_opacity: int = 100
     bold: bool = False
     shadow_enabled: bool = True               # 3.8 阴影「启用」
-    shadow_offset_x: int = 2
-    shadow_offset_y: int = 2
-    shadow_blur: int = 2
-    shadow_color: str = "#000000"
+    shadow_offset_x: int = 6
+    shadow_offset_y: int = 6
+    shadow_blur: int = 6
+    shadow_color: str = "auto"                # auto = 取与墨色相反的颜色
     shadow_opacity: int = 70
 
     # --- ③ 输出与合规命名 ---
@@ -324,8 +324,8 @@ class RuleConfig:
                 e.append("时间来源非「固定文本」时，水印内容模板必须包含 {time}，否则成品不含时间戳")
             if self.position not in POSITIONS:
                 e.append(f"水印位置非法：{self.position}")
-            if not _valid_hex_color(self.font_color) or not _valid_hex_color(self.shadow_color):
-                e.append("字体色/阴影色须为 #RRGGBB 格式")
+            if not _valid_color_or_auto(self.font_color) or not _valid_color_or_auto(self.shadow_color):
+                e.append("字体色/阴影色须为 #RRGGBB 或 auto（系统按背景自动取色）")
             if not 4 <= self.font_size <= 2000:
                 e.append("字号须在 4–2000 之间")
             if self.font_size_unit not in ("px", "pt"):
@@ -384,6 +384,12 @@ class RuleConfig:
 
 def _valid_hex_color(value: str) -> bool:
     return isinstance(value, str) and bool(re.fullmatch(r"#[0-9A-Fa-f]{6}", value))
+
+
+def _valid_color_or_auto(value: str) -> bool:
+    """时间水印的字体色/阴影色：固定比色值或 auto（按每张照片背景自动取色）。"""
+    return isinstance(value, str) and (
+        value.strip().lower() == "auto" or _valid_hex_color(value))
 
 
 def _path_writable(value: str) -> bool:
