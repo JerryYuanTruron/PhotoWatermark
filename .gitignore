@@ -1,0 +1,26 @@
+# ---- Python 中间产物 ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- 运行时生成 ----
+rules/last_used.json
+logs/
+_output/
+_test_out/
+*.log
+
+# ---- 构建中间产物（dist 内的交付 exe 需入库，故只忽略目录内通配内容）----
+build/
+dist/*
+!dist/.gitkeep
+!dist/PhotoWatermark.exe
+*.spec
+
+# ---- 操作系统 ----
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---- 交付给操作人员的 exe 例外：dist/PhotoWatermark.exe 需入库 ----
+!dist/PhotoWatermark.exe

@@ -1,0 +1,5 @@
+# 运行依赖（Python 3.10+ / Windows）
+Pillow>=10.0,<14.0
+
+# 仅打包时需要（源码运行不需要）
+# pyinstaller>=6.0
