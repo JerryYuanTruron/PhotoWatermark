@@ -30,8 +30,9 @@ from .engine import (
 STAGE_ADVICE = {
     "导入": "确认文件未损坏、格式受支持(JPG/PNG/BMP/TIF/WEBP)；必要时从相机重新导出或补拍。"
             "BMP/TIF/WEBP 常不含 EXIF，建议先转 JPG 或改时间来源",
-    "时间源": "确认原图保留了 EXIF DateTimeOriginal(拍摄日期)；勿用微信/截图等会剥离 EXIF 的方式传输。"
-              "如确无 EXIF，可改为「回退到文件修改时间」（会标记警告，需人工核对时间）",
+    "时间源": "客户口径要求重新导出保留 EXIF DateTimeOriginal(拍摄日期) 的原图。"
+              "勿用微信/截图等会剥离 EXIF 的方式传输（APP1 残留时间仅作诊断，不作为水印来源）。"
+              "若确实无法补原图，需由客户书面确认后才可改用其它时间来源",
     "尺寸调整": "检查目标宽高是否过大、内存是否充足；必要时改用「不缩放」或降低目标尺寸",
     "水印渲染": "检查字体文件与不透明度(须≥1)、字号是否过大、目标画布是否过小、"
                 "内容模板是否包含 {time}",
@@ -121,13 +122,23 @@ def audit_batch(results: list[ProcessResult], cfg: RuleConfig | None = None) -> 
         mode = cfg.resize_mode if cfg else "未知"
         notes.append(f"提示：批次内成品尺寸不一致（{', '.join(sorted(sizes))}；"
                      f"缩放方式={mode}）。贴入报告前请统一尺寸")
-    # 文档「≥2100 万像素」是拍摄原件评价要求；成品像素数如实记录，避免误导
-    if cfg and cfg.resize_mode != "none":
-        pixels = cfg.target_width * cfg.target_height
-        notes.append(
-            f"提示：本次目标输出 {cfg.target_width}×{cfg.target_height} = {pixels:,} 像素。"
-            "文档第 8/10 节「≥2100 万像素」是拍摄原件的评价要求，本程序不校验该指标；"
-            "原始照片请另行归档，成品用于报告/客户交付")
+    # 客户规范 V1 p.3 / V2 §8·§10：交付成品必须 ≥2100 万像素；程序已强制校验主输出
+    if cfg:
+        passed = [r for r in results if r.ok and r.output_megapixels > 0]
+        if cfg.min_output_megapixels > 0:
+            if passed:
+                mp = [r.output_megapixels for r in passed]
+                notes.append(
+                    f"提示：主输出像素数已强制校验（客户下限 {cfg.min_output_megapixels:g} MP / ≥2100 万像素），"
+                    f"本批成品 {min(mp):.2f}–{max(mp):.2f} MP，全部达标。")
+            else:
+                notes.append(
+                    f"提示：客户像素下限 {cfg.min_output_megapixels:g} MP / ≥2100 万像素 已启用；"
+                    "本批无合格成品，详见失败清单。")
+        if any(r.report_copy_path for r in results):
+            notes.append(
+                "提示：本批另生成了报告插图副本（文件名带报告版后缀），其像素数低于 "
+                f"{cfg.min_output_megapixels:g} MP，仅用于贴报告，不可替代主交付原件。")
 
     if not findings:
         findings.append("通过：失败照片均未产生成品，成功照片输出文件均可正常解码")

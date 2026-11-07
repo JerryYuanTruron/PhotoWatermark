@@ -88,7 +88,12 @@ def _selftest(workdir: str) -> int:
 
         cfg = config.RuleConfig()
         cfg.output_dir = str(out)
+        cfg.ecu_name = "EEPH"
+        cfg.serial_number = "SELFTEST"
+        cfg.min_output_megapixels = 0   # 自检用小合成图，主链路不施加 21 MP 门槛
         ck("config_valid", cfg.validate() == [], cfg.validate())
+        ck("compliant_naming_template", cfg.filename_template == "{ecu}_{serial}_{seq}",
+           cfg.filename_template)
         # 行为标记：确认 exe 内确实是本版代码（而非旧包配了新 BUILD_INFO）
         bad = config.RuleConfig(output_dir=str(out), font_opacity=0)
         ck("guard_invisible_watermark",
@@ -97,6 +102,22 @@ def _selftest(workdir: str) -> int:
            any("{time}" in e for e in config.RuleConfig(
                output_dir=str(out), content_template="PHOTO OK").validate()), "")
         ck("exif_diagnostics", hasattr(engine, "read_exif_datetime_ex"), "")
+        # v1.1.0 客户合规门槛
+        ck("guard_pixel_spec",
+           any("低于客户要求" in e for e in config.RuleConfig(
+               output_dir=str(out), ecu_name="EEPH", serial_number="SELFTEST",
+               resize_mode="contain", target_width=2400, target_height=1800).validate()), "")
+        naming_errs = config.RuleConfig(output_dir=str(out)).validate()
+        ck("guard_naming_required",
+           any("ECU 名称" in e for e in naming_errs)
+           and any("序列号" in e for e in naming_errs), naming_errs)
+        strict = config.RuleConfig(output_dir=str(out), ecu_name="EEPH",
+                                   serial_number="SELFTEST")
+        ck("strict_exif_policy",
+           strict.time_source == "exif" and strict.missing_exif_policy == "fail"
+           and strict.resize_mode == "none", "")
+        ck("precheck_available", hasattr(engine, "precheck_exif")
+           and hasattr(engine, "diagnose_app1_capture_time"), "")
 
         used: set[str] = set()
         started = datetime.now()
@@ -124,9 +145,12 @@ def _selftest(workdir: str) -> int:
         ck("attempted_output_recorded",
            all(x.attempted_output for x in rs if x.ok),
            [x.attempted_output for x in rs if x.ok])
+        ck("compliant_output_name",
+           bool(produced) and produced[0].name == "EEPH_SELFTEST_0001.jpg",
+           [x.name for x in produced])
         if produced:
             with Image.open(produced[0]) as im:
-                ck("output_size", im.size == (2400, 1800), im.size)
+                ck("output_size", im.size == (1200, 900), im.size)  # 保持原尺寸
                 dpi = im.info.get("dpi")
                 ck("output_dpi", dpi is not None and abs(dpi[0] - 300) < 2, dpi)
                 ck("exif_preserved",

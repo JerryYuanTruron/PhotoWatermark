@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import struct
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -58,6 +59,7 @@ POS_ANCHORS = {
 ILLEGAL_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]')
 MAX_FILENAME_CHARS = 120          # 单文件名上限，避免 Windows 260 字符路径限制
 MIN_VISIBLE_WM_PIXELS = 20        # 水印区域至少要有这么多个像素被明显改变
+APP1_TIME_PATTERN = re.compile(rb"(20\d{2}:\d{2}:\d{2} \d{2}:\d{2}:\d{2})")
 
 
 @dataclass
@@ -81,6 +83,8 @@ class ProcessResult:
     watermark_rect: tuple[int, int, int, int] | None = None
     # 无论成功失败都记录「本次尝试写出的路径」，供批次审计反向核对残留成品
     attempted_output: str = ""
+    output_megapixels: float = 0.0
+    report_copy_path: str = ""
 
     @property
     def ok(self) -> bool:
@@ -97,6 +101,8 @@ class ProcessResult:
             "警告/说明": "；".join(self.warnings),
             "原尺寸": self.original_size,
             "输出尺寸": self.output_size,
+            "输出像素(MP)": self.output_megapixels if self.ok else "",
+            "报告版副本": Path(self.report_copy_path).name if self.report_copy_path else "",
             "拍摄时间": self.capture_time,
             "水印内容": self.watermark_text,
             "输出文件": self.output_path,
@@ -174,9 +180,61 @@ def _parse_exif_dt(raw: Any) -> datetime | None:
         return None
 
 
-def format_content(template: str, time_text: str, stem: str, seq: int) -> str:
-    # {name}/{filename} 均为原文件名（不含扩展名）；{time} 时间文本；{seq} 四位序号
+def diagnose_app1_capture_time(path: Path) -> str:
+    """只读诊断：从 JPEG APP1/Exif 段提取「孤儿」相机时间字符串。
+
+    微信等传输工具会改写主 IFD 并剥离 306/36867/36868，但原始时间字符串
+    常仍留在 APP1 数据区。本函数**仅用于失败原因提示**，返回值绝不作为水印时间源
+    （客户口径：先补 EXIF 原图再处理，不接受从残留数据推断的时间）。
+    """
+    try:
+        with path.open("rb") as f:
+            data = f.read(262144)
+        i = 2
+        while i < len(data) - 4:
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            if marker == 0xDA:
+                break
+            length = struct.unpack(">H", data[i + 2:i + 4])[0]
+            if marker == 0xE1 and data[i + 4:i + 10] == b"Exif\x00\x00":
+                seg = data[i + 10:i + 2 + length]
+                vals = sorted({x.decode("ascii", "ignore")
+                               for x in APP1_TIME_PATTERN.findall(seg)})
+                return vals[0] if vals else ""
+            i += 2 + length
+    except (OSError, struct.error):
+        pass
+    return ""
+
+
+def precheck_exif(path: str | Path) -> str:
+    """导入阶段轻量预检：只读 EXIF，不解码整幅大图。返回问题描述，空串表示通过。"""
+    p = Path(path)
+    try:
+        with Image.open(p) as im:
+            dt, _tag, note = read_exif_datetime_ex(im.getexif())
+        if dt is None:
+            return "缺少 EXIF 拍摄日期（需重新导出保留 EXIF 的原图）"
+        if note:
+            return note
+    except (OSError, ValueError, UnidentifiedImageError) as exc:
+        return f"文件读取失败：{exc}"
+    return ""
+
+
+def format_content(template: str, time_text: str, stem: str, seq: int,
+                   extra: dict[str, str] | None = None) -> str:
+    # {name}/{filename} 原文件名；{time} 时间文本；{seq} 四位序号(V1 示例 0001)
+    # {ecu}/{serial} 由操作人员填写，程序不预填
     tokens = {"time": time_text, "filename": stem, "name": stem, "seq": f"{seq:04d}"}
+    if extra:
+        tokens.update(extra)
     out = template
     for key, val in tokens.items():
         out = out.replace("{" + key + "}", val)
@@ -202,8 +260,9 @@ def build_output_path(
     否则「输出目录 = 源目录」时，后处理的源照片会被前一张的成品静默替换（原始证据丢失）。
     """
     stem = source.stem
+    naming_extra = {"ecu": cfg.ecu_name.strip(), "serial": cfg.serial_number.strip()}
     name = format_content(cfg.filename_template, safe_filename_part(time_text), stem,
-                          cfg.start_index + seq - 1)
+                          cfg.start_index + seq - 1, naming_extra)
     name = safe_filename_part(name) or stem
     name = name[:MAX_FILENAME_CHARS]  # 防止模板过长触发 OS 路径长度错误
     out_dir = Path(cfg.output_dir)
@@ -507,9 +566,16 @@ def process_one(source: str | Path, cfg: RuleConfig, seq: int,
                 dt, tag = exif_dt, exif_tag
                 if dt is None:
                     if cfg.missing_exif_policy == "fail":
+                        hint = ""
+                        if cfg.diagnose_app1_time:
+                            recovered = diagnose_app1_capture_time(src)
+                            if recovered:
+                                hint = (f"；诊断：文件 APP1 残留相机时间 {recovered}，"
+                                        "说明原图曾含时间信息、经传输工具剥离 EXIF。"
+                                        "按客户口径不使用该恢复值，请重新导出保留 EXIF 的原图")
                         return abort(STAGE_TIME,
                                      "缺少 EXIF 拍摄日期（DateTimeOriginal / DateTimeDigitized / DateTime 均未找到），"
-                                     "无法按文档 3.6 生成时间水印")
+                                     "无法按文档 3.6 生成时间水印" + hint)
                     if cfg.missing_exif_policy == "use_file_mtime":
                         dt = datetime.fromtimestamp(src.stat().st_mtime)
                         r.warnings.append("缺失 EXIF 拍摄日期，按策略回退到文件修改时间，非 EXIF 拍摄日期")
@@ -538,8 +604,9 @@ def process_one(source: str | Path, cfg: RuleConfig, seq: int,
                     name_time_text = time_text
                 except (ValueError, TypeError) as exc:
                     return abort(STAGE_TIME, f"时间格式渲染失败：{exc}")
-            r.watermark_text = format_content(cfg.content_template, time_text, src.stem,
-                                              cfg.start_index + seq - 1)
+            r.watermark_text = format_content(
+                cfg.content_template, time_text, src.stem, cfg.start_index + seq - 1,
+                {"ecu": cfg.ecu_name.strip(), "serial": cfg.serial_number.strip()})
             if not r.watermark_text:
                 return abort(STAGE_TIME, "水印内容为空（请检查内容模板与时间格式）")
             if cfg.time_source != "fixed" and time_text and time_text not in r.watermark_text:
@@ -567,6 +634,15 @@ def process_one(source: str | Path, cfg: RuleConfig, seq: int,
         #      ② 任何失败都不会在输出目录留下「判失败但已产出」的残留文件。
         fmt, ext = resolve_output_format(cfg, src)
         expected_size = image.size
+        # 客户硬规定：主交付成品必须 ≥2100 万像素（V1 p.3 / V2 §8·§10）。
+        # 在写盘前拦截，避免整批产出不合规文件。
+        out_mp = expected_size[0] * expected_size[1] / 1_000_000
+        if cfg.min_output_megapixels > 0 and out_mp < cfg.min_output_megapixels:
+            return abort(
+                STAGE_VERIFY,
+                f"主输出像素数 {out_mp:.2f} MP（{expected_size[0]}×{expected_size[1]}）低于客户要求 "
+                f"{cfg.min_output_megapixels:g} MP；请改用「不缩放」保持原分辨率，或增大目标尺寸")
+        r.output_megapixels = round(out_mp, 2)
         prot = protected_paths
         try:
             out_path = build_output_path(src, cfg, seq, ext, name_time_text, used_names, prot)
@@ -601,8 +677,18 @@ def process_one(source: str | Path, cfg: RuleConfig, seq: int,
 
         r.output_path = str(out_path)
         r.output_size = f"{expected_size[0]}×{expected_size[1]}"
+
+        if cfg.report_copy_enabled:
+            copy_path, copy_err = _export_report_copy(
+                image, cfg, out_path, fmt, raw_exif, icc_profile, seq, used_names, prot)
+            if copy_path:
+                r.report_copy_path = copy_path
+                r.warnings.append("已生成报告插图副本；该副本不满足 ≥2100 万像素，不可替代主交付原件")
+            else:
+                r.warnings.append(copy_err)
+
         downgrade = ("缺失 EXIF", "非 EXIF", "未执行输出回读校验", "未写入 EXIF",
-                     "自动缩小", "回退到", "不足")
+                     "自动缩小", "回退到", "不足", "报告版导出失败", "报告版校验失败")
         r.status = STATUS_WARNING if any(
             any(k in w for k in downgrade) for w in r.warnings) else STATUS_SUCCESS
         return r
@@ -612,6 +698,41 @@ def process_one(source: str | Path, cfg: RuleConfig, seq: int,
     finally:
         _cleanup(tmp_path)
         r.duration_ms = int((time.perf_counter() - started) * 1000)
+
+
+def _export_report_copy(image: Image.Image, cfg: RuleConfig, out_path: Path,
+                        fmt: str, raw_exif: bytes, icc_profile: bytes | None,
+                        seq: int, used: set[str], protected: set[str] | None) -> tuple[str, str]:
+    """可选：另出一套用于报告插图的轻量副本。
+
+    该副本**不满足 ≥2100 万像素**，不可替代主交付原件；失败只记警告、不影响主输出。
+    水印沿用主图（随缩放等比缩小），时间、字体、位置与主输出完全一致。
+    """
+    tw, th = cfg.target_width, cfg.target_height
+    small = ImageOps.contain(image, (tw, th), method=Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (tw, th), hex_to_rgb(cfg.background))
+    canvas.paste(small, ((tw - small.width) // 2, (th - small.height) // 2))
+    suffix = cfg.report_copy_suffix.strip() or "_报告版"
+    rp = out_path.with_name(out_path.stem + suffix + out_path.suffix)
+    prot = protected or set()
+    try:
+        if str(rp.resolve()).lower() in prot or str(rp).lower() in used:
+            rp = _unique_path(rp, used, prot)
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        tmp = rp.with_name(f"._pw_report_{os.getpid()}_{seq}_{int(time.time() * 1000)}.tmp")
+        try:
+            _save_image(canvas, tmp, fmt, cfg, raw_exif, icc_profile)
+            ok, why, _, _ = _verify_output(tmp, (tw, th), fmt, cfg)
+            if not ok:
+                return "", f"报告版校验失败：{why}"
+            os.replace(str(tmp), str(rp))
+            tmp = None  # type: ignore[assignment]
+            used.add(str(rp).lower())
+            return str(rp), ""
+        finally:
+            _cleanup(tmp)  # type: ignore[arg-type]
+    except (OSError, ValueError, TypeError) as exc:
+        return "", f"报告版导出失败：{exc}"
 
 
 def _cleanup(path: Path | None) -> None:

@@ -44,6 +44,7 @@ from .engine import (
     STATUS_SUCCESS,
     STATUS_WARNING,
     ProcessResult,
+    precheck_exif,
     process_one,
 )
 from .reporter import BatchSummary, export_reports, summarize
@@ -67,7 +68,11 @@ FIELD_GROUPS: list[tuple[str, list[Field], str]] = [
         ("dpi", "像素规格 DPI", "int", None, ""),
         ("output_format", "输出格式", "mapped", OUTPUT_FORMATS, ""),
         ("jpeg_quality", "JPEG 质量", "int", None, ""),
-    ], "默认 2400×1800 / 4:3 / 300 DPI；「适应留白」不裁切证据画面。"),
+        ("min_output_megapixels", "主输出像素下限 (MP)", "int", None, ""),
+        ("report_copy_enabled", "另出报告插图副本", "bool", None, ""),
+        ("report_copy_suffix", "报告版文件名后缀", "text", None, ""),
+    ], "客户规范 V1 p.3 / V2 §8·§10：交付成品必须 ≥2100 万像素。默认「不缩放」保持原分辨率（实测 50.3 MP）。"
+       "目标宽高仅在自定义缩放或「报告插图副本」时生效；副本不满足 2100 万像素，不可替代主交付原件。"),
 
     ("② 时间水印 · 内容与时间", [
         ("watermark_enabled", "启用时间水印", "bool", None, ""),
@@ -76,7 +81,8 @@ FIELD_GROUPS: list[tuple[str, list[Field], str]] = [
         ("time_format", "时间格式", "editable", [f for f, _ in TIME_FORMAT_PRESETS], ""),
         ("content_template", "水印内容模板", "editable", ["{time}", "{filename}  {time}", "{seq}  {time}"], ""),
         ("missing_exif_policy", "拍摄日期缺失时", "mapped", EXIF_POLICIES, ""),
-    ], "文档 3.6/3.7：EXIF 拍摄日期，格式 年/月/日 时:分:秒。模板支持 {time} {filename} {seq} 及任意文字。"),
+    ], "客户口径：严格使用 EXIF 拍摄日期，缺失即判失败并要求补原图；不使用文件修改时间、"
+       "固定文本或 APP1 残留推断值。文档 3.7 格式 年/月/日 时:分:秒。"),
 
     ("③ 时间水印 · 位置 / 字体 / 阴影", [
         ("position", "水印位置", "mapped", POSITIONS, ""),
@@ -97,21 +103,27 @@ FIELD_GROUPS: list[tuple[str, list[Field], str]] = [
         ("font_path", "自定义字体文件", "fontfile", None, ""),
     ], "文档 3.7/3.8：位置右下、微软雅黑、尺寸 70、阴影启用；X/Y 留白默认 0，此处留出安全边距便于贴报告。"),
 
-    ("④ 输出与命名", [
+    ("④ 输出与合规命名", [
         ("output_dir", "输出目录", "dir", None, ""),
+        ("ecu_name", "ECU 名称 (必填)", "text", None, ""),
+        ("serial_number", "样品序列号 (必填)", "text", None, ""),
         ("filename_template", "批量文件名模板", "editable", [t for t, _ in FILENAME_TEMPLATE_PRESETS], ""),
         ("on_exists", "同名文件时", "mapped", ON_EXISTS, ""),
         ("start_index", "起始序号", "int", None, ""),
         ("keep_metadata", "保留 EXIF 元数据", "bool", None, ""),
-    ], "文档 3.9：输出目录 + 批量改名 {name}_结果。第 10/11 节 <ECU>_<serial>_<seq> 命名需由源文件名保证；"
-       "改模板为 {name} 只是不追加 _结果 后缀，不会自动规范命名。"),
+    ], "客户规范 V1 p.3 / V2 §11：<ECU 名称>_<序列号>_<四位序号>，例 PeCu_2718281828_0001。"
+       "ECU 名称与序列号由操作人员填写一次、整批生效，程序不预填（避免 OCR 误差进入客户文件名）。"
+       "V2 步骤 3.9 截图的 {name}_结果 仅作归档口径，不满足客户命名规范。"),
 
     ("⑤ 失败识别与输出校验", [
         ("verify_output", "输出后回读校验", "bool", None, ""),
         ("min_output_bytes", "成品最小字节数", "int", None, ""),
         ("max_source_pixels", "源图像素安全上限", "int", None, ""),
-    ], "校验可解码、目标尺寸、DPI、文件大小、格式；不校验水印可见性、时间戳正确性、像素数与命名规范。"
-       "失败照片自动清理临时/残留成品并列入失败清单。"),
+        ("precheck_exif", "导入时预检 EXIF", "bool", None, ""),
+        ("diagnose_app1_time", "缺 EXIF 时给诊断提示", "bool", None, ""),
+    ], "校验可解码、目标尺寸、DPI、文件大小、格式、主输出像素数 ≥2100 万；"
+       "不校验水印可见性、时间戳正确性、命名规范与拍摄顺序。"
+       "预检会在导入后提前标出「需补保留 EXIF 原图」的照片，避免处理完才发现整批失败。"),
 ]
 
 TREE_COLUMNS = [
@@ -152,6 +164,7 @@ class App(tk.Tk):
         self.vars: dict[str, tk.Variable] = {}
         self.widgets: dict[str, tk.Widget] = {}
         self.invalid_fields: list[str] = []
+        self.precheck: dict[str, str] = {}
         self.files: list[str] = []
         self.results: list[ProcessResult] = []
         self.summary: BatchSummary | None = None
@@ -238,8 +251,9 @@ class App(tk.Tk):
 
         note = ttk.Label(
             bar,
-            text="注意：默认 2400×1800 为「报告 / 客户交付」尺寸；文档「≥2100 万像素」是拍摄原件的评价要求，"
-                 "原始照片请另行归档。需输出原始分辨率时请切换「高像素归档 · 保持原尺寸」预置。",
+            text="客户合规口径：默认「不缩放」保持原分辨率并强制校验成品 ≥2100 万像素；"
+                 "时间水印只认 EXIF 拍摄日期（缺失即失败，须补原图）；文件名按 <ECU>_<序列号>_<四位序号> 生成，"
+                 "请先在「输出与合规命名」填写 ECU 名称与序列号。报告插图副本为可选，不满足像素要求。",
             foreground="#9A5B00", wraplength=1180, justify="left")
         note.pack(fill="x", pady=(4, 0))
 
@@ -546,16 +560,34 @@ class App(tk.Tk):
                 existing.add(p.lower())
                 added += 1
         self._refresh_import_count()
+        self._run_precheck()
         self._rebuild_pending_rows()
-        self._set_status(f"导入 {added} 张（去重后共 {len(self.files)} 张）；无需逐张设置，可直接开始批量处理。")
+        bad = sum(1 for v in self.precheck.values() if v)
+        head = f"导入 {added} 张（去重后共 {len(self.files)} 张）；无需逐张设置。"
+        if bad:
+            self._set_status(
+                f"{head} 预检发现 {bad} 张缺少/异常 EXIF 拍摄日期，按客户口径会判失败；"
+                "请重新导出保留 EXIF 的原图（避免微信/截图传输）。")
+        else:
+            self._set_status(head + " 全部通过 EXIF 预检，可开始批量处理。")
         if added:
             self.nb.select(self.tab_results)
+
+    def _run_precheck(self) -> None:
+        """导入后轻量预检 EXIF（只读文件头，不解码 50MP 大图）。"""
+        self.precheck = {}
+        cfg = self._collect_config()
+        if not cfg.precheck_exif or not cfg.watermark_enabled or cfg.time_source != "exif":
+            return
+        for p in self.files:
+            self.precheck[p] = precheck_exif(p)
 
     def _clear_files(self) -> None:
         if self.busy:
             return
         self.files.clear()
         self.results.clear()
+        self.precheck.clear()
         self.summary = None
         self.report_paths.clear()
         self.tree.delete(*self.tree.get_children())
@@ -569,9 +601,11 @@ class App(tk.Tk):
     def _rebuild_pending_rows(self) -> None:
         self.tree.delete(*self.tree.get_children())
         for i, p in enumerate(self.files, 1):
+            issue = self.precheck.get(p, "")
             self.tree.insert("", "end", iid=str(i),
-                             values=(i, Path(p).name, "", "待处理", "", "", ""),
-                             tags=("pending",))
+                             values=(i, Path(p).name, "", "需补原图" if issue else "待处理",
+                                     "EXIF 预检" if issue else "", issue, ""),
+                             tags=("warn",) if issue else ("pending",))
         self.progress.configure(maximum=max(1, len(self.files)), value=0)
         self.progress_label.configure(text=f"0 / {len(self.files)}")
 

@@ -70,11 +70,14 @@ TIME_FORMAT_PRESETS: list[tuple[str, str]] = [
     ("%d.%m.%Y %H:%M:%S", "日.月.年 时:分:秒"),
 ]
 
+# V1 p.3 / V2 §11 命名规范：<ECU name>_<serial number>_<sequential number>
+# {seq} 为 4 位序号（V1 示例 0001）；{ecu}/{serial} 由操作人员在界面填写，程序不预填，
+# 避免把 OCR 误差或猜测值写进客户交付文件名。
 FILENAME_TEMPLATE_PRESETS: list[tuple[str, str]] = [
-    ("{name}_结果", "{name}_结果（文档 3.9 截图）"),
-    ("{name}", "{name}（保持原名，不追加 _结果 后缀）"),
-    ("{name}_{seq}", "{name}_{seq}（原名 + 四位序号）"),
-    ("{seq}_{name}", "{seq}_{name}（四位序号 + 原名）"),
+    ("{ecu}_{serial}_{seq}", "{ecu}_{serial}_{seq}（客户合规命名，默认）"),
+    ("{name}_结果", "{name}_结果（V2 步骤 3.9 截图，仅归档用）"),
+    ("{name}", "{name}（保持原名，不追加后缀）"),
+    ("{seq}_{name}", "{seq}_{name}（序号 + 原名）"),
 ]
 
 # 文档 3.8：字体「微软雅黑」，尺寸 70；阴影「启用」
@@ -100,13 +103,18 @@ class RuleConfig:
     """一次批量处理的全部规则。字段顺序即界面分组顺序。"""
 
     # --- ① 尺寸与像素规格 ---
-    target_width: int = 2400
-    target_height: int = 1800
-    resize_mode: str = "contain"
+    # 客户规范 V1 p.3「est. 21 MP」/ V2 §8·§10「≥2100 万像素」是评价检查项，
+    # 交付成品必须满足。故默认「不缩放」以保持原分辨率（真实照片实测 50.3 MP）。
+    target_width: int = 5292                 # 仅在自定义缩放 / 报告版副本时使用
+    target_height: int = 3969                # 4:3，约 2100 万像素
+    resize_mode: str = "none"
     background: str = "#FFFFFF"
     dpi: int = 300
     output_format: str = "同原格式"
     jpeg_quality: int = 92
+    min_output_megapixels: int = 21          # 主输出像素数下限(MP)，低于即判失败
+    report_copy_enabled: bool = False        # 可选：另出一套报告插图轻量副本
+    report_copy_suffix: str = "_报告版"
 
     # --- ② 时间水印 ---
     watermark_enabled: bool = True
@@ -131,18 +139,22 @@ class RuleConfig:
     shadow_color: str = "#000000"
     shadow_opacity: int = 70
 
-    # --- ③ 输出 ---
+    # --- ③ 输出与合规命名 ---
     output_dir: str = ""
-    filename_template: str = "{name}_结果"    # 3.9 批量文件名
+    filename_template: str = "{ecu}_{serial}_{seq}"   # V1 p.3 / V2 §11 合规命名
+    ecu_name: str = ""                       # 由操作人员填写，程序不预填
+    serial_number: str = ""                  # 由操作人员填写，程序不预填
     on_exists: str = "overwrite"
     start_index: int = 1
-    missing_exif_policy: str = "fail"
+    missing_exif_policy: str = "fail"        # 严格口径：缺 EXIF 即失败，要求补原图
     keep_metadata: bool = True                # 3.9 输出页签「保持元数据」
 
     # --- ④ 校验 ---
     verify_output: bool = True
     min_output_bytes: int = 256
     max_source_pixels: int = 300_000_000      # 解压炸弹保护
+    precheck_exif: bool = True                # 导入时预检 EXIF，提前标出需补原图的照片
+    diagnose_app1_time: bool = True           # 仅在失败原因中提示 APP1 残留时间（不用于水印）
 
     # ------------------------------------------------------------------
     # 序列化
@@ -167,6 +179,8 @@ class RuleConfig:
             try:
                 if expected == "int" or expected is int:
                     value = int(value)
+                elif expected == "float" or expected is float:
+                    value = float(value)
                 elif expected == "bool" or expected is bool:
                     value = bool(value) if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes", "on")
                 elif expected == "str" or expected is str:
@@ -203,6 +217,17 @@ class RuleConfig:
                 e.append("目标宽度须在 16–20000 px 之间")
             if not 16 <= self.target_height <= 20000:
                 e.append("目标高度须在 16–20000 px 之间")
+            # 客户硬规定：主输出必须 ≥ min_output_megapixels 百万像素。
+            # 自定义缩放时提前拦截，避免整批产出不合规成品后才发现。
+            mp = self.target_width * self.target_height / 1_000_000
+            if mp < self.min_output_megapixels:
+                e.append(f"目标尺寸 {self.target_width}×{self.target_height} = {mp:.2f} MP，"
+                         f"低于客户要求 {self.min_output_megapixels:g} MP（≥2100 万像素）；"
+                         "请改用「不缩放」或增大目标尺寸")
+        if not 0 <= self.min_output_megapixels <= 500:
+            e.append("输出像素下限须在 0–500 MP 之间")
+        if re.search(r'[\\/:*?"<>|]', self.report_copy_suffix):
+            e.append("报告版后缀含非法字符")
         if not 1 <= self.dpi <= 2400:
             e.append("像素规格 DPI 须在 1–2400 之间")
         if self.output_format not in OUTPUT_FORMATS:
@@ -266,6 +291,16 @@ class RuleConfig:
             e.append("文件名模板不能为空")
         elif re.search(r'[\\/:*?"<>|]', self.filename_template):
             e.append("文件名模板不能包含 \\ / : * ? \" < > | 等非法字符")
+        # 合规命名：模板引用 {ecu}/{serial} 时，必须由操作人员填写，程序不得预填或猜测
+        needs_naming = ("{ecu}" in self.filename_template
+                        or "{serial}" in self.filename_template)
+        if needs_naming:
+            for key, label in (("ecu_name", "ECU 名称"), ("serial_number", "序列号")):
+                value = str(getattr(self, key, "")).strip()
+                if not value:
+                    e.append(f"请填写{label}（合规命名 {self.filename_template} 需要，程序不预填）")
+                elif re.search(r'[\\/:*?"<>|\s]', value):
+                    e.append(f"{label}含空格或非法字符：{value}")
         if self.on_exists not in ON_EXISTS:
             e.append(f"同名策略非法：{self.on_exists}")
         if self.missing_exif_policy not in EXIF_POLICIES:
@@ -367,21 +402,33 @@ def resolve_font(font_family: str, explicit_path: str = "") -> str:
 # --------------------------------------------------------------------------
 
 PRESETS: dict[str, dict[str, Any]] = {
-    "文档预置 · 报告/客户交付（2400×1800 @300DPI）": {
-        "target_width": 2400, "target_height": 1800, "resize_mode": "contain",
-        "dpi": 300, "output_format": "同原格式", "jpeg_quality": 92,
-        "font_size": 70, "font_size_unit": "px", "position": "bottom_right",
-        "time_format": "%Y/%m/%d %H:%M:%S", "filename_template": "{name}_结果",
-    },
-    "高像素归档 · 保持原尺寸（不缩放，需自行核对像素数）": {
+    "客户合规预置 · 保持原分辨率 + 合规命名（默认）": {
+        # 与 RuleConfig() 默认值逐项一致，避免「启动默认」与「恢复默认」行为不同
         "resize_mode": "none", "dpi": 300, "output_format": "同原格式",
-        "jpeg_quality": 95, "font_size": 160, "font_size_unit": "px",
-        "filename_template": "{name}_结果",
+        "jpeg_quality": 92, "font_size": 70, "font_size_unit": "px",
+        "position": "bottom_right", "time_format": "%Y/%m/%d %H:%M:%S",
+        "filename_template": "{ecu}_{serial}_{seq}",
+        "min_output_megapixels": 21, "report_copy_enabled": False,
+        "missing_exif_policy": "fail",
     },
-    "轻量预览 · 1600×1200 @150DPI": {
-        "target_width": 1600, "target_height": 1200, "resize_mode": "contain",
-        "dpi": 150, "output_format": "JPEG", "jpeg_quality": 88,
-        "font_size": 48, "font_size_unit": "px", "filename_template": "{name}_结果",
+    "合规 + 报告插图副本（原件 + 2400×1800）": {
+        "resize_mode": "none", "target_width": 2400, "target_height": 1800,
+        "dpi": 300, "output_format": "同原格式", "jpeg_quality": 95,
+        "font_size": 160, "font_size_unit": "px", "report_copy_enabled": True,
+        "report_copy_suffix": "_报告版", "filename_template": "{ecu}_{serial}_{seq}",
+        "min_output_megapixels": 21,
+    },
+    "统一重采样至 5292×3969（约 2100 万像素，4:3）": {
+        "target_width": 5292, "target_height": 3969, "resize_mode": "contain",
+        "dpi": 300, "output_format": "JPEG", "jpeg_quality": 92,
+        "font_size": 150, "font_size_unit": "px",
+        "filename_template": "{ecu}_{serial}_{seq}",
+        "min_output_megapixels": 21,
+    },
+    "V2 步骤 3.9 归档口径（{name}_结果，不做像素合规）": {
+        "resize_mode": "none", "dpi": 300, "output_format": "同原格式",
+        "jpeg_quality": 95, "font_size": 160,
+        "filename_template": "{name}_结果", "min_output_megapixels": 0,
     },
 }
 
