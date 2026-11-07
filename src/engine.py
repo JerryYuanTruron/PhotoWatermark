@@ -283,12 +283,22 @@ def _stage_watermark(
     if rect[2] <= rect[0] or rect[3] <= rect[1]:
         raise RuntimeError("画布过小，水印文本无可绘制区域（请增大目标尺寸或缩小字号）")
 
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    # 性能优化：只在水印局部区域（含阴影/模糊外扩）建 RGBA 图层。
+    # 对整张画布做 GaussianBlur 与 alpha_composite 会让单张处理慢 1 个数量级。
+    pad = 4 + cfg.shadow_blur * 3
+    px0 = max(0, x - abs(cfg.shadow_offset_x) - pad)
+    py0 = max(0, y - abs(cfg.shadow_offset_y) - pad)
+    px1 = min(W, x + tw + abs(cfg.shadow_offset_x) + pad)
+    py1 = min(H, y + th + abs(cfg.shadow_offset_y) + pad)
+    lw, lh = px1 - px0, py1 - py0
+    lx, ly = x - px0, y - py0
+
+    layer = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
     if cfg.shadow_enabled and cfg.shadow_opacity > 0:
-        shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        shadow = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
         sd = ImageDraw.Draw(shadow)
         sc = hex_to_rgb(cfg.shadow_color)
-        sd.text((x + cfg.shadow_offset_x, y + cfg.shadow_offset_y), text, font=font,
+        sd.text((lx + cfg.shadow_offset_x, ly + cfg.shadow_offset_y), text, font=font,
                 fill=sc + (round(255 * cfg.shadow_opacity / 100),), anchor="lt")
         if cfg.shadow_blur > 0:
             shadow = shadow.filter(ImageFilter.GaussianBlur(cfg.shadow_blur))
@@ -299,13 +309,15 @@ def _stage_watermark(
     kwargs: dict[str, Any] = {}
     if cfg.bold:
         kwargs = {"stroke_width": max(1, font.size // 40), "stroke_fill": fc + (round(255 * cfg.font_opacity / 100),)}
-    d.text((x, y), text, font=font,
+    d.text((lx, ly), text, font=font,
            fill=fc + (round(255 * cfg.font_opacity / 100),), anchor="lt", **kwargs)
 
     if layer.getbbox() is None:
         raise RuntimeError("水印图层为空，渲染失败")
 
-    out = Image.alpha_composite(base.convert("RGBA"), layer).convert("RGB")
+    out = base.copy()
+    region = Image.alpha_composite(out.crop((px0, py0, px1, py1)).convert("RGBA"), layer).convert("RGB")
+    out.paste(region, (px0, py0))
     # 渲染有效性自检：水印区域必须与渲染前存在差异
     if ImageChops.difference(base.crop(rect), out.crop(rect)).getbbox() is None:
         raise RuntimeError("水印区域像素未发生变化（颜色与底层相同或透明度为 0）")

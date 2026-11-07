@@ -140,7 +140,7 @@ class RuleConfig:
 
     # --- ④ 校验 ---
     verify_output: bool = True
-    min_output_bytes: int = 1024
+    min_output_bytes: int = 256
     max_source_pixels: int = 300_000_000      # 解压炸弹保护
 
     # ------------------------------------------------------------------
@@ -223,6 +223,13 @@ class RuleConfig:
                     datetime.now().strftime(self.time_format)
                 except (ValueError, TypeError) as exc:
                     e.append(f"时间格式非法：{exc}")
+                # Windows 的 strftime 会把未知 % 指令原样输出，导致水印显示成 "%Q" 之类乱码。
+                # 显式拦截不支持的 ASCII 字母指令，避免错误配置静默产出不可用水印。
+                allowed = set("aAbBcdHIjmMpSUwWxXyYZfGuVeD%")
+                unknown = [c for c in re.findall(r"%(.)", self.time_format)
+                           if c.isascii() and c.isalpha() and c not in allowed]
+                if unknown:
+                    e.append(f"时间格式含不支持的指令：%{unknown[0]}（请检查拼写）")
             if not self.content_template.strip():
                 e.append("水印内容模板不能为空")
             if self.position not in POSITIONS:
