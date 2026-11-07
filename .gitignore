@@ -14,7 +14,7 @@ build/
 dist/*
 !dist/.gitkeep
 !dist/PhotoWatermark.exe
-*.spec
+!dist/BUILD_INFO.txt
 
 # ---- 操作系统 ----
 Thumbs.db
