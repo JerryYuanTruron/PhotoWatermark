@@ -19,22 +19,15 @@ from PIL import Image  # noqa: F401  (确保打包时 PIL 被收集)
 
 from . import __app_name__, __spec_source__, __version__
 from .config import (
-    DEFAULT_PRESET,
-    EXIF_POLICIES,
     FILENAME_TEMPLATE_PRESETS,
     ON_EXISTS,
     OUTPUT_FORMATS,
-    POSITIONS,
-    PRESETS,
     RESIZE_MODES,
     SUPPORTED_INPUT_EXTS,
-    TIME_FORMAT_PRESETS,
-    TIME_SOURCES,
+    WATERMARK_PREVIEW_TEXT,
     RuleConfig,
     app_base_dir,
-    list_system_fonts,
     load_last_used,
-    preset_config,
     rules_dir,
     save_last_used,
 )
@@ -63,73 +56,41 @@ from .reporter import BatchSummary, export_reports, summarize
 
 Field = tuple[str, str, str, Any, str]
 
-FONT_CHOICES = {label: label for label, _ in list_system_fonts()}
-UNIT_CHOICES = {"px": "px（输出图像素）", "pt": "pt（按 DPI 换算）"}
+# 顶部「必填信息」面板中的字段：优先前置、集中展示、明确标识
+REQUIRED_FIELDS: tuple[str, ...] = ("ecu_name", "serial_number", "output_dir")
+PANEL_FIELDS: tuple[str, ...] = REQUIRED_FIELDS + ("start_index",)
 
-FIELD_GROUPS: list[tuple[str, list[Field], str]] = [
-    ("① 尺寸与像素规格", [
+# 高级设置页签（只含非水印项；时间水印由系统固定生成，不在此出现、也不可修改）
+ADVANCED_GROUPS: list[tuple[str, list[Field], str]] = [
+    ("输出规格", [
+        ("resize_mode", "缩放方式", "mapped", RESIZE_MODES, ""),
         ("target_width", "目标宽度 (px)", "int", None, ""),
         ("target_height", "目标高度 (px)", "int", None, ""),
-        ("resize_mode", "缩放方式", "mapped", RESIZE_MODES, ""),
-        ("background", "留白背景色", "color", None, ""),
         ("dpi", "像素规格 DPI", "int", None, ""),
         ("output_format", "输出格式", "mapped", OUTPUT_FORMATS, ""),
         ("jpeg_quality", "JPEG 质量", "int", None, ""),
         ("min_output_megapixels", "主输出像素下限 (MP)", "int", None, ""),
-        ("report_copy_enabled", "另出报告插图副本", "bool", None, ""),
-        ("report_copy_suffix", "报告版文件名后缀", "text", None, ""),
-    ], "客户规范 V1 p.3 / V2 §8·§10：交付成品必须 ≥2100 万像素。默认「不缩放」保持原分辨率（实测 50.3 MP）。"
-       "目标宽高仅在自定义缩放或「报告插图副本」时生效；副本不满足 2100 万像素，不可替代主交付原件。"),
+        ("background", "留白背景色", "color", None, ""),
+    ], "客户规范 V1 p.3 / V2 §8·§10：交付成品必须 ≥2100 万像素。默认「不缩放」保持原分辨率，通常无需修改。"),
 
-    ("② 时间水印 · 内容与时间", [
-        ("watermark_enabled", "启用时间水印", "bool", None, ""),
-        ("time_source", "时间来源", "mapped", TIME_SOURCES, ""),
-        ("fixed_time_text", "固定文本内容", "text", None, ""),
-        ("time_format", "时间格式", "editable", [f for f, _ in TIME_FORMAT_PRESETS], ""),
-        ("content_template", "水印内容模板", "editable", ["{time}", "{filename}  {time}", "{seq}  {time}"], ""),
-        ("missing_exif_policy", "拍摄日期缺失时", "mapped", EXIF_POLICIES, ""),
-    ], "严格使用 EXIF 拍摄日期，缺失时弹出提示窗口并要求提供保留完整 EXIF 的原始照片。"
-       "文档 3.7 格式 年/月/日 时:分:秒。"),
-
-    ("③ 时间水印 · 位置 / 字体 / 阴影", [
-        ("position", "水印位置", "mapped", POSITIONS, ""),
-        ("font_family", "字体", "mapped", FONT_CHOICES, ""),
-        ("margin_x", "水平边距 (px)", "int", None, ""),
-        ("margin_y", "垂直边距 (px)", "int", None, ""),
-        ("font_size", "字号", "int", None, ""),
-        ("font_size_unit", "字号单位", "mapped", UNIT_CHOICES, ""),
-        ("font_color", "字体颜色", "color", None, ""),
-        ("font_opacity", "字体不透明度 %", "int", None, ""),
-        ("bold", "加粗描边", "bool", None, ""),
-        ("shadow_enabled", "启用阴影", "bool", None, ""),
-        ("shadow_offset_x", "阴影 X 偏移", "int", None, ""),
-        ("shadow_offset_y", "阴影 Y 偏移", "int", None, ""),
-        ("shadow_blur", "阴影模糊", "int", None, ""),
-        ("shadow_color", "阴影颜色", "color", None, ""),
-        ("shadow_opacity", "阴影不透明度 %", "int", None, ""),
-        ("font_path", "自定义字体文件", "fontfile", None, ""),
-    ], "文档 3.7/3.8：位置右下、微软雅黑、尺寸 70、阴影启用；X/Y 留白默认 0，此处留出安全边距便于贴报告。"),
-
-    ("④ 输出与合规命名", [
-        ("output_dir", "输出目录", "dir", None, ""),
-        ("ecu_name", "ECU 名称 (必填)", "text", None, ""),
-        ("serial_number", "样品序列号 (必填)", "text", None, ""),
+    ("输出与命名", [
         ("filename_template", "批量文件名模板", "editable", [t for t, _ in FILENAME_TEMPLATE_PRESETS], ""),
         ("on_exists", "同名文件时", "mapped", ON_EXISTS, ""),
-        ("start_index", "起始序号", "int", None, ""),
         ("keep_metadata", "保留 EXIF 元数据", "bool", None, ""),
-    ], "客户规范 V1 p.3 / V2 §11：<ECU 名称>_<序列号>_<四位序号>，例 PeCu_2718281828_0001。"
-       "ECU 名称与序列号由操作人员填写一次、整批生效，程序不预填（避免 OCR 误差进入客户文件名）。"
-       "V2 步骤 3.9 界面示例的 {name}_结果 仅作归档口径，不满足客户命名规范。"),
+        ("report_copy_enabled", "另出报告插图副本", "bool", None, ""),
+        ("report_copy_suffix", "报告版文件名后缀", "text", None, ""),
+    ], "命名默认 <ECU 名称>_<序列号>_<四位序号>（V1 p.3 / V2 §11）；报告插图副本不满足 2100 万像素，不可替代主交付原件。"),
 
-    ("⑤ 失败识别与输出校验", [
+    ("输出校验", [
         ("verify_output", "输出后回读校验", "bool", None, ""),
         ("min_output_bytes", "成品最小字节数", "int", None, ""),
         ("max_source_pixels", "源图像素安全上限", "int", None, ""),
-    ], "校验可解码、目标尺寸、DPI、文件大小、格式、主输出像素数 ≥2100 万；"
-       "不校验水印可见性、时间戳正确性、命名规范与拍摄顺序。"
-       "EXIF 检查为固定行为，仅依据照片 EXIF，不含 EXIF 时弹窗提示并列入失败清单。"),
+    ], "校验可解码、目标尺寸、DPI、文件大小、格式、主输出像素数。"),
 ]
+
+ADVANCED_FIELDS: tuple[str, ...] = tuple(k for _, specs, _ in ADVANCED_GROUPS for k, *_ in specs)
+# 界面上出现的全部字段 = 配置字段 − 系统固定的水印字段
+UI_FIELDS: tuple[str, ...] = PANEL_FIELDS + ADVANCED_FIELDS
 
 TREE_COLUMNS = [
     ("idx", "#", 48), ("name", "文件名", 230), ("osize", "原尺寸", 100),
@@ -239,10 +200,12 @@ class App(tk.Tk):
         self.worker: threading.Thread | None = None
         self.busy = False
         self.include_subfolders = tk.BooleanVar(value=False)
+        self.required_entries: dict[str, ttk.Entry] = {}
+        self.required_filled = 0
 
         self._build_style()
         self._build_header()
-        self._build_toolbar()
+        self._build_required_panel()
         self._build_notebook()
         self._build_footer()
         boot = load_last_used()
@@ -252,7 +215,12 @@ class App(tk.Tk):
         self._apply_config(boot)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._refresh_import_count()
-        self._set_status("就绪。请确认规则配置，然后批量导入照片。")
+        self._update_required_state()
+        if self.required_filled < len(REQUIRED_FIELDS):
+            self._focus_first_required()
+        self._set_status("请先完成顶部 3 项必填信息，然后批量导入照片。" if
+                         self.required_filled < len(REQUIRED_FIELDS) else
+                         "必填信息已就绪，可批量导入照片。")
 
     # ------------------------------------------------------------------
     # 样式与骨架
@@ -274,6 +242,11 @@ class App(tk.Tk):
                      background="#FFFFFF", fieldbackground="#FFFFFF", foreground="#1F2933")
         st.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
         st.configure("Horizontal.TProgressbar", troughcolor="#E3E8EF", background="#2D7DD2")
+        # 必填项未填时输入框底色变红，配合 ★ 标识让缺项一眼可见
+        st.configure("Required.TEntry", fieldbackground="#FFFFFF", padding=2)
+        st.map("Required.TEntry",
+               fieldbackground=[("invalid", "#FFF1F0"), ("!invalid", "#FFFFFF")],
+               foreground=[("invalid", "#C5221F"), ("!invalid", "#1F2933")])
 
     def _build_header(self) -> None:
         f = tk.Frame(self, bg="#134E7C", height=54)
@@ -283,59 +256,118 @@ class App(tk.Tk):
                  font=("Microsoft YaHei UI", 14, "bold")).pack(side="left", padx=10)
         tk.Label(f, text=f"v{__version__}   |   流程依据：{__spec_source__}", bg="#134E7C",
                  fg="#CFE3F5", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=4)
-        tk.Label(f, text="一次导入 · 全程免逐张设置 · 自动调整尺寸/DPI + 时间水印 + 批量导出",
+        tk.Label(f, text=f"水印固定 {WATERMARK_PREVIEW_TEXT}",
                  bg="#134E7C", fg="#FFD98A", font=("Microsoft YaHei UI", 9)).pack(side="right", padx=14)
 
-    def _build_toolbar(self) -> None:
-        bar = ttk.Frame(self, padding=(10, 8, 10, 2))
-        bar.pack(side="top", fill="x")
+    # ------------------------------------------------------------------
+    # 顶部「必填信息」面板：优先前置、集中展示、明确标识
+    # ------------------------------------------------------------------
+    def _build_required_panel(self) -> None:
+        box = ttk.LabelFrame(self, text=" 第 1 步 · 必填信息（★ 为必填，填一次下次自动带入） ",
+                             padding=(10, 8))
+        box.pack(side="top", fill="x", padx=10, pady=(8, 0))
+        self.required_box = box
 
-        row1 = ttk.Frame(bar)
-        row1.pack(fill="x", pady=2)
-        ttk.Label(row1, text="预置方案：").pack(side="left")
-        self.preset_var = tk.StringVar(value=DEFAULT_PRESET)
-        cb = ttk.Combobox(row1, textvariable=self.preset_var, values=list(PRESETS),
-                          state="readonly", width=46)
-        cb.pack(side="left", padx=(2, 6))
-        ttk.Button(row1, text="应用预置", command=self._apply_preset).pack(side="left", padx=2)
-        ttk.Button(row1, text="保存规则…", command=self._save_rules).pack(side="left", padx=2)
-        ttk.Button(row1, text="载入规则…", command=self._load_rules).pack(side="left", padx=2)
-        ttk.Button(row1, text="重置为文档预置(全部)", command=self._restore_default).pack(side="left", padx=2)
+        row1 = ttk.Frame(box)
+        row1.pack(fill="x")
+        self._required_field(row1, "ecu_name", "★ ECU 名称", 26)
+        self._required_field(row1, "serial_number", "★ 样品序列号", 30)
+        self._required_field(row1, "output_dir", "★ 输出目录", 46, browse=True)
+        ttk.Label(row1, text="起始序号").pack(side="left", padx=(10, 3))
+        var = tk.StringVar()
+        self.vars["start_index"] = var
+        self.widgets["start_index"] = ttk.Entry(row1, textvariable=var, width=6)
+        self.widgets["start_index"].pack(side="left")
 
-        row2 = ttk.Frame(bar)
-        row2.pack(fill="x", pady=2)
-        ttk.Button(row2, text="① 添加照片", command=self._add_files).pack(side="left", padx=2)
-        ttk.Button(row2, text="① 添加文件夹", command=self._add_folder).pack(side="left", padx=2)
+        row2 = ttk.Frame(box)
+        row2.pack(fill="x", pady=(9, 0))
+        ttk.Button(row2, text="① 导入照片", command=self._add_files).pack(side="left", padx=2)
+        ttk.Button(row2, text="① 导入文件夹", command=self._add_folder).pack(side="left", padx=2)
+        ttk.Checkbutton(row2, text="包含子文件夹",
+                        variable=self.include_subfolders).pack(side="left", padx=(8, 2))
         ttk.Button(row2, text="清空列表", command=self._clear_files).pack(side="left", padx=2)
-        ttk.Checkbutton(row2, text="包含子文件夹", variable=self.include_subfolders).pack(side="left", padx=(8, 2))
         self.import_label = ttk.Label(row2, text="已导入 0 张", foreground="#134E7C",
                                       font=("Microsoft YaHei UI", 9, "bold"))
-        self.import_label.pack(side="left", padx=14)
-        ttk.Label(row2, text="支持 JPG / PNG / BMP / TIF / WEBP；重复文件自动去重",
+        self.import_label.pack(side="left", padx=12)
+        self.btn_start = ttk.Button(row2, text="② 开始批量处理", command=self._start_batch)
+        self.btn_start.pack(side="right", padx=2)
+        self.required_label = ttk.Label(row2, text="", font=("Microsoft YaHei UI", 9, "bold"))
+        self.required_label.pack(side="right", padx=10)
+
+        row3 = ttk.Frame(box)
+        row3.pack(fill="x", pady=(7, 0))
+        tk.Label(row3, text=f"时间水印：系统统一生成 · {WATERMARK_PREVIEW_TEXT} · 不可修改，无需任何设置",
+                 bg="#F5F7FA", fg="#0B6B3A",
+                 font=("Microsoft YaHei UI", 9, "bold")).pack(side="left")
+        ttk.Label(row3, text="（水印内容仅年月日时分秒，不附加文字、标识或可变信息）",
+                  foreground="#5F6B7A").pack(side="left", padx=8)
+        ttk.Label(row3, text="支持 JPG/PNG/BMP/TIF/WEBP，重复文件自动去重",
                   foreground="#5F6B7A").pack(side="right")
 
-        note = ttk.Label(
-            bar,
-            text="客户合规口径：默认「不缩放」保持原分辨率并强制校验成品 ≥2100 万像素；"
-                 "导入时校验 4:3 横版比例与方向、缺少 EXIF 信息时分别弹出提示窗口（不阻断其余照片导入）；"
-                 "文件名按 <ECU>_<序列号>_<四位序号> 生成，请先在「输出与合规命名」填写 ECU 名称与序列号。"
-                 "报告插图副本为可选，不满足像素要求。",
-            foreground="#9A5B00", wraplength=1180, justify="left")
-        note.pack(fill="x", pady=(4, 0))
+    def _required_field(self, parent: tk.Widget, key: str, label: str, width: int,
+                        browse: bool = False) -> None:
+        ttk.Label(parent, text=label, foreground="#C5221F",
+                  font=("Microsoft YaHei UI", 9, "bold")).pack(side="left", padx=(8, 3))
+        var = tk.StringVar()
+        self.vars[key] = var
+        entry = ttk.Entry(parent, textvariable=var, width=width, style="Required.TEntry")
+        entry.pack(side="left")
+        self.required_entries[key] = entry
+        if browse:
+            ttk.Button(parent, text="浏览", width=5, command=self._pick_dir).pack(side="left", padx=3)
+        var.trace_add("write", lambda *_: self._update_required_state())
+
+    def _update_required_state(self) -> None:
+        """刷新必填状态：空值高亮、显示已填数量、未填满时禁用「开始批量处理」。"""
+        filled = 0
+        for key in REQUIRED_FIELDS:
+            var = self.vars.get(key)
+            value = "" if var is None else str(var.get()).strip()
+            entry = self.required_entries.get(key)
+            if value:
+                filled += 1
+                if entry is not None:
+                    entry.state(["!invalid"])
+            elif entry is not None:
+                entry.state(["invalid"])
+        self.required_filled = filled
+        total = len(REQUIRED_FIELDS)
+        if hasattr(self, "required_label"):
+            done = filled == total
+            self.required_label.configure(
+                text="必填项已完整 ✓" if done else f"必填 {filled}/{total} 已填写",
+                foreground="#0B6B3A" if done else "#C5221F")
+        if hasattr(self, "btn_start"):
+            self.btn_start.configure(
+                state="normal" if filled == total and not self.busy else "disabled")
+
+    def _focus_first_required(self) -> None:
+        for key in REQUIRED_FIELDS:
+            var = self.vars.get(key)
+            if var is not None and not str(var.get()).strip():
+                entry = self.required_entries.get(key)
+                if entry is not None:
+                    entry.focus_set()
+                return
+
+    def _missing_required(self) -> list[str]:
+        labels = {"ecu_name": "ECU 名称", "serial_number": "样品序列号", "output_dir": "输出目录"}
+        return [labels[k] for k in REQUIRED_FIELDS
+                if not str(self.vars.get(k, tk.StringVar()).get()).strip()]
 
     def _build_notebook(self) -> None:
         nb = ttk.Notebook(self)
         nb.pack(side="top", fill="both", expand=True, padx=10, pady=6)
         self.nb = nb
-        self.tab_config = ttk.Frame(nb)
         self.tab_results = ttk.Frame(nb)
-        nb.add(self.tab_config, text="  规则配置  ")
-        nb.add(self.tab_results, text="  照片与逐张处理结果  ")
-        self._build_config_tab()
+        self.tab_advanced = ttk.Frame(nb)
+        nb.add(self.tab_results, text="  第 2 步 · 照片与逐张处理结果  ")
+        nb.add(self.tab_advanced, text="  高级设置（一般无需修改）  ")
         self._build_results_tab()
+        self._build_advanced_tab()
 
-    def _build_config_tab(self) -> None:
-        outer = ttk.Frame(self.tab_config)
+    def _build_advanced_tab(self) -> None:
+        outer = ttk.Frame(self.tab_advanced)
         outer.pack(fill="both", expand=True)
         canvas = tk.Canvas(outer, bg="#F5F7FA", highlightthickness=0)
         sb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
@@ -348,16 +380,28 @@ class App(tk.Tk):
         sb.pack(side="right", fill="y")
 
         def _wheel(e: Any) -> None:
-            # 仅当「规则配置」页签处于激活状态才滚动配置区，避免干扰结果表滚动
+            # 仅当「高级设置」页签处于激活状态才滚动配置区，避免干扰结果表滚动
             try:
-                if self.nb.index(self.nb.select()) == 0:
+                if self.nb.index(self.nb.select()) == 1:
                     canvas.yview_scroll(int(-e.delta / 120), "units")
             except (tk.TclError, AttributeError):
                 pass
 
         canvas.bind_all("<MouseWheel>", _wheel)
 
-        for title, specs, hint in FIELD_GROUPS:
+        tools = ttk.Frame(inner)
+        tools.pack(fill="x", padx=8, pady=(8, 2))
+        ttk.Label(tools,
+                  text=f"时间水印由系统统一生成（{WATERMARK_PREVIEW_TEXT}），"
+                       "本页不含任何水印项，也不可修改水印。",
+                  foreground="#0B6B3A",
+                  font=("Microsoft YaHei UI", 9, "bold")).pack(side="left")
+        ttk.Button(tools, text="载入设置…", command=self._load_rules).pack(side="right", padx=2)
+        ttk.Button(tools, text="保存设置…", command=self._save_rules).pack(side="right", padx=2)
+        ttk.Button(tools, text="恢复默认", command=self._restore_advanced_defaults).pack(
+            side="right", padx=2)
+
+        for title, specs, hint in ADVANCED_GROUPS:
             grp = ttk.LabelFrame(inner, text=title, padding=(10, 8))
             grp.pack(fill="x", padx=8, pady=6)
             for i, (key, label, kind, options, _) in enumerate(specs):
@@ -414,12 +458,6 @@ class App(tk.Tk):
             w.pack(side="left", fill="x", expand=True)
             ttk.Button(cell, text="浏览", width=5, command=self._pick_dir).pack(side="left", padx=3)
             self.vars[key] = var
-        elif kind == "fontfile":
-            var = tk.StringVar()
-            w = ttk.Entry(cell, textvariable=var, width=22)
-            w.pack(side="left", fill="x", expand=True)
-            ttk.Button(cell, text="浏览", width=5, command=self._pick_font).pack(side="left", padx=3)
-            self.vars[key] = var
         self.widgets[key] = w if kind not in ("mapped",) else self.widgets.get(key, w)
 
     def _build_results_tab(self) -> None:
@@ -463,8 +501,7 @@ class App(tk.Tk):
         f.pack(side="bottom", fill="x")
         btns = ttk.Frame(f)
         btns.pack(fill="x")
-        self.btn_start = ttk.Button(btns, text="② 开始批量处理", command=self._start_batch)
-        self.btn_start.pack(side="left", padx=2)
+        # 「② 开始批量处理」在顶部必填面板内（唯一入口，未填满必填项时禁用）
         self.btn_stop = ttk.Button(btns, text="停止", command=self._stop_batch, state="disabled")
         self.btn_stop.pack(side="left", padx=2)
         self.btn_failure = ttk.Button(btns, text="③ 导出 / 查看失败清单", command=self._open_failure_list)
@@ -508,7 +545,9 @@ class App(tk.Tk):
         for key, widget in self.widgets.items():
             if isinstance(widget, MappedCombo):
                 setattr(cfg, key, widget.value())
-        return cfg
+        # 时间水印由系统统一生成：界面不提供任何水印项，此处再固化一次，
+        # 确保即使界面字段被误改也无法改变水印内容/格式/外观。
+        return cfg.apply_fixed_watermark()
 
     def _apply_config(self, cfg: RuleConfig) -> None:
         for key, var in self.vars.items():
@@ -520,13 +559,13 @@ class App(tk.Tk):
         for key, widget in self.widgets.items():
             if isinstance(widget, MappedCombo):
                 widget.set_value(str(getattr(cfg, key, "")))
-        for key in ("background", "font_color", "shadow_color"):
-            sw = self.widgets.get(key + "_swatch")
-            if sw is not None:
-                try:
-                    sw.configure(bg=str(getattr(cfg, key)))
-                except tk.TclError:
-                    pass
+        sw = self.widgets.get("background_swatch")
+        if sw is not None:
+            try:
+                sw.configure(bg=str(cfg.background))
+            except tk.TclError:
+                pass
+        self._update_required_state()
 
     def _pick_color(self, key: str, swatch: tk.Label) -> None:
         initial = self.vars[key].get() or "#FFFFFF"
@@ -543,30 +582,14 @@ class App(tk.Tk):
         if d:
             self.vars["output_dir"].set(str(Path(d)))
 
-    def _pick_font(self) -> None:
-        p = filedialog.askopenfilename(title="选择字体文件",
-                                       filetypes=[("字体文件", "*.ttf *.ttc *.otf"), ("所有文件", "*.*")])
-        if p:
-            self.vars["font_path"].set(p)
-
-    def _apply_preset(self) -> None:
-        name = self.preset_var.get()
-        cfg = self._collect_config()
-        # 只覆盖该预置明确声明的字段，保留输出目录、字体、水印等用户自定义项
-        for k, v in PRESETS.get(name, {}).items():
-            if hasattr(cfg, k):
-                setattr(cfg, k, v)
-        self._apply_config(cfg)
-        self._set_status(f"已应用预置：{name}（输出目录与已导入照片保持不变）")
-
-    def _restore_default(self) -> None:
-        self.preset_var.set(DEFAULT_PRESET)
-        cfg = self._collect_config()
-        out = cfg.output_dir
-        d = preset_config(DEFAULT_PRESET)
-        d.output_dir = out
-        self._apply_config(d)
-        self._set_status("已恢复文档预置规则")
+    def _restore_advanced_defaults(self) -> None:
+        """只把「高级设置」里的非水印项恢复默认，必填信息与已导入照片保持不变。"""
+        keep = {k: str(self.vars[k].get()) for k in PANEL_FIELDS if k in self.vars}
+        self._apply_config(RuleConfig())
+        for k, v in keep.items():
+            self.vars[k].set(v)
+        self._update_required_state()
+        self._set_status("高级设置已恢复默认（必填信息与已导入照片保持不变）")
 
     def _save_rules(self) -> None:
         cfg = self._collect_config()
@@ -747,16 +770,22 @@ class App(tk.Tk):
     def _start_batch(self) -> None:
         if self.busy:
             return
+        missing = self._missing_required()
+        if missing:
+            self._focus_first_required()
+            messagebox.showwarning("必填信息未完成",
+                                   "请先在顶部「必填信息」填写：" + "、".join(missing))
+            return
         cfg = self._collect_config()
         errors = list(cfg.validate())
         if self.invalid_fields:
             errors.insert(0, "以下数值字段填写非法，请改为数字：" + "、".join(self.invalid_fields))
         if errors:
-            self.nb.select(self.tab_config)
-            messagebox.showerror("规则配置有误，无法开始", "\n".join(f"• {e}" for e in errors))
+            self.nb.select(self.tab_advanced)
+            messagebox.showerror("设置项有误，无法开始", "\n".join(f"• {e}" for e in errors))
             return
         if not self.files:
-            messagebox.showinfo("请先导入照片", "请点击「添加照片」或「添加文件夹」批量导入后再开始。")
+            messagebox.showinfo("请先导入照片", "请点击「① 导入照片」或「① 导入文件夹」批量导入后再开始。")
             return
         # 处理前再按同一纯 EXIF 条件复核一次（已弹窗提示过的不会重复弹出），
         # 保证任何入口下缺 EXIF 都不会被静默跳过。
@@ -882,8 +911,8 @@ class App(tk.Tk):
 
     def _finish_batch(self) -> None:
         self.busy = False
-        self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
+        self._update_required_state()   # 必填完整时才恢复「开始批量处理」
         self.nb.select(self.tab_results)
 
     def _show_done_message(self, s: BatchSummary, paths: dict[str, str], cfg: RuleConfig) -> None:
@@ -965,8 +994,10 @@ class App(tk.Tk):
     def _open_output_dir(self) -> None:
         d = self.vars["output_dir"].get().strip()
         if not d:
-            messagebox.showinfo("未设置输出目录", "请先在「规则配置 → 输出与命名」中指定输出目录。")
-            self.nb.select(self.tab_config)
+            messagebox.showinfo("未设置输出目录", "请先在顶部「必填信息」中填写 ★ 输出目录。")
+            entry = self.required_entries.get("output_dir")
+            if entry is not None:
+                entry.focus_set()
             return
         p = Path(d)
         p.mkdir(parents=True, exist_ok=True)

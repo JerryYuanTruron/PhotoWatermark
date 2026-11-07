@@ -61,14 +61,48 @@ ON_EXISTS = {
     "rename": "自动加序号另存",
 }
 
-# 文档 3.7「年/月/日 时:分:秒」对应文档界面示例 [EXIF:Date Taken [Y/m/d H:M:S]]
-TIME_FORMAT_PRESETS: list[tuple[str, str]] = [
-    ("%Y/%m/%d %H:%M:%S", "年/月/日 时:分:秒（文档 3.7，默认）"),
-    ("%Y-%m-%d %H:%M:%S", "年-月-日 时:分:秒"),
-    ("%Y/%m/%d %H:%M", "年/月/日 时:分"),
-    ("%Y年%m月%d日 %H:%M:%S", "中文年月日 时分秒"),
-    ("%d.%m.%Y %H:%M:%S", "日.月.年 时:分:秒"),
-]
+# --------------------------------------------------------------------------
+# 时间水印：系统固定规格（操作人员不可编辑、不可选择格式、不可自定义）
+#
+# 约束（使用要求）：
+#   - 时间水印由系统统一生成，生成后固化且保持不变；
+#   - 内容只显示年月日时分秒，格式严格固定为 yyyy/mm/dd hh:mm:ss；
+#   - 不附加任何其他文字、标识或可变信息（文件名、序号、ECU 等一律不得进入水印）。
+# 因此下列取值是常量而非配置项：界面不暴露、规则文件不可覆盖、
+# 预置方案不得覆盖，引擎在入口处再强制回写（RuleConfig.apply_fixed_watermark）。
+# --------------------------------------------------------------------------
+
+WATERMARK_TIME_FORMAT = "%Y/%m/%d %H:%M:%S"     # yyyy/mm/dd hh:mm:ss
+WATERMARK_CONTENT_TEMPLATE = "{time}"           # 仅时间，不附加任何内容
+WATERMARK_PREVIEW_TEXT = "yyyy/mm/dd hh:mm:ss"
+
+WATERMARK_FIXED: dict[str, Any] = {
+    "watermark_enabled": True,
+    "time_source": "exif",            # 系统统一取 EXIF 拍摄日期，不允许改用文件时间
+    "fixed_time_text": "",
+    "time_format": WATERMARK_TIME_FORMAT,
+    "content_template": WATERMARK_CONTENT_TEMPLATE,
+    "missing_exif_policy": "fail",    # 缺 EXIF 即失败，不允许降级为其它时间来源
+    "position": "bottom_right",       # 文档 3.7 位置「右下」
+    "margin_x": 24,                   # 固定安全边距，避免贴边被裁
+    "margin_y": 20,
+    "font_family": "微软雅黑",          # 文档 3.8 字体
+    "font_path": "",
+    "font_size": 70,                  # 文档 3.8 尺寸 70
+    "font_size_unit": "px",
+    "font_color": "#FFFFFF",
+    "font_opacity": 100,
+    "bold": False,
+    "shadow_enabled": True,           # 文档 3.8 阴影「启用」
+    "shadow_offset_x": 2,
+    "shadow_offset_y": 2,
+    "shadow_blur": 2,
+    "shadow_color": "#000000",
+    "shadow_opacity": 70,
+}
+
+# 这些字段不允许出现在界面、也不允许被规则文件改写
+FIXED_WATERMARK_FIELDS: tuple[str, ...] = tuple(WATERMARK_FIXED)
 
 # V1 p.3 / V2 §11 命名规范：<ECU name>_<serial number>_<sequential number>
 # {seq} 为 4 位序号（V1 示例 0001）；{ecu}/{serial} 由操作人员在界面填写，程序不预填，
@@ -116,7 +150,9 @@ class RuleConfig:
     report_copy_enabled: bool = False        # 可选：另出一套报告插图轻量副本
     report_copy_suffix: str = "_报告版"
 
-    # --- ② 时间水印 ---
+    # --- ② 时间水印（系统固定规格，非可配置项） ---
+    # 下列字段仅为引擎内部取值载体，默认值必须与 WATERMARK_FIXED 一致；
+    # 界面不暴露、规则文件不可覆盖、引擎入口强制回写。
     watermark_enabled: bool = True
     time_source: str = "exif"                 # 3.6 读取 EXIF 拍摄日期
     fixed_time_text: str = ""
@@ -157,6 +193,20 @@ class RuleConfig:
     # 不受任何配置项、文件名、文件时间或其它数据来源影响。
 
     # ------------------------------------------------------------------
+    # 时间水印固化
+    # ------------------------------------------------------------------
+    def apply_fixed_watermark(self) -> "RuleConfig":
+        """把时间水印字段强制为系统固定值，返回自身（幂等）。
+
+        调用点覆盖全部操作路径：规则文件载入（from_dict）、界面收集（_collect_config）、
+        预置方案（preset_config）、引擎入口（engine.process_one）。
+        因此不存在任何可改写水印内容、格式或外观的路径。
+        """
+        for key, value in WATERMARK_FIXED.items():
+            setattr(self, key, value)
+        return self
+
+    # ------------------------------------------------------------------
     # 序列化
     # ------------------------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
@@ -188,7 +238,8 @@ class RuleConfig:
             except (TypeError, ValueError):
                 continue
             setattr(cfg, key, value)
-        return cfg
+        # 规则文件不得改写时间水印规格（即使旧文件/被手工编辑过也不生效）
+        return cfg.apply_fixed_watermark()
 
     def save(self, path: str | Path) -> None:
         p = Path(path)
@@ -236,6 +287,13 @@ class RuleConfig:
             e.append("JPEG 质量须在 1–100 之间")
         if not _valid_hex_color(self.background):
             e.append("背景色须为 #RRGGBB 格式")
+
+        # 时间水印为系统固定规格：出现非固定值说明配置被外部改写，必须显式拦截，
+        # 而不是静默按新值生成水印（水印内容/格式不允许任何人自定义）。
+        dirty = [k for k, v in WATERMARK_FIXED.items() if getattr(self, k, None) != v]
+        if dirty:
+            e.append("时间水印由系统统一生成（仅时间，格式 yyyy/mm/dd hh:mm:ss），"
+                     f"以下字段不可自定义：{'、'.join(dirty)}")
 
         if self.watermark_enabled:
             if self.time_source not in TIME_SOURCES:
@@ -401,34 +459,29 @@ def resolve_font(font_family: str, explicit_path: str = "") -> str:
 # 预置方案
 # --------------------------------------------------------------------------
 
+# 预置方案只覆盖非水印项（时间水印为系统固定规格，任何预置都不得改动）
 PRESETS: dict[str, dict[str, Any]] = {
-    "客户合规预置 · 保持原分辨率 + 合规命名（默认）": {
+    "客户合规 · 保持原分辨率 + 合规命名（默认）": {
         # 与 RuleConfig() 默认值逐项一致，避免「启动默认」与「恢复默认」行为不同
         "resize_mode": "none", "dpi": 300, "output_format": "同原格式",
-        "jpeg_quality": 92, "font_size": 70, "font_size_unit": "px",
-        "position": "bottom_right", "time_format": "%Y/%m/%d %H:%M:%S",
-        "filename_template": "{ecu}_{serial}_{seq}",
+        "jpeg_quality": 92, "filename_template": "{ecu}_{serial}_{seq}",
         "min_output_megapixels": 21, "report_copy_enabled": False,
-        "missing_exif_policy": "fail",
     },
     "合规 + 报告插图副本（原件 + 2400×1800）": {
         "resize_mode": "none", "target_width": 2400, "target_height": 1800,
         "dpi": 300, "output_format": "同原格式", "jpeg_quality": 95,
-        "font_size": 160, "font_size_unit": "px", "report_copy_enabled": True,
-        "report_copy_suffix": "_报告版", "filename_template": "{ecu}_{serial}_{seq}",
-        "min_output_megapixels": 21,
+        "report_copy_enabled": True, "report_copy_suffix": "_报告版",
+        "filename_template": "{ecu}_{serial}_{seq}", "min_output_megapixels": 21,
     },
     "统一重采样至 5292×3969（约 2100 万像素，4:3）": {
         "target_width": 5292, "target_height": 3969, "resize_mode": "contain",
         "dpi": 300, "output_format": "JPEG", "jpeg_quality": 92,
-        "font_size": 150, "font_size_unit": "px",
-        "filename_template": "{ecu}_{serial}_{seq}",
-        "min_output_megapixels": 21,
+        "filename_template": "{ecu}_{serial}_{seq}", "min_output_megapixels": 21,
     },
     "V2 步骤 3.9 归档口径（{name}_结果，不做像素合规）": {
         "resize_mode": "none", "dpi": 300, "output_format": "同原格式",
-        "jpeg_quality": 95, "font_size": 160,
-        "filename_template": "{name}_结果", "min_output_megapixels": 0,
+        "jpeg_quality": 95, "filename_template": "{name}_结果",
+        "min_output_megapixels": 0,
     },
 }
 
@@ -440,7 +493,7 @@ def preset_config(name: str) -> RuleConfig:
     for k, v in PRESETS.get(name, {}).items():
         if hasattr(cfg, k):
             setattr(cfg, k, v)
-    return cfg
+    return cfg.apply_fixed_watermark()
 
 
 # --------------------------------------------------------------------------

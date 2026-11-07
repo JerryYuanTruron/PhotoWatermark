@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -95,12 +96,18 @@ def _selftest(workdir: str) -> int:
         ck("compliant_naming_template", cfg.filename_template == "{ecu}_{serial}_{seq}",
            cfg.filename_template)
         # 行为标记：确认 exe 内确实是本版代码（而非旧包配了新 BUILD_INFO）
+        # v1.2.0：时间水印为系统固定规格，任何自定义都必须被拦截
         bad = config.RuleConfig(output_dir=str(out), font_opacity=0)
-        ck("guard_invisible_watermark",
-           any("字体不透明度" in e for e in bad.validate()), bad.validate())
-        ck("guard_missing_time_token",
-           any("{time}" in e for e in config.RuleConfig(
-               output_dir=str(out), content_template="PHOTO OK").validate()), "")
+        ck("guard_watermark_not_configurable",
+           any("不可自定义" in e for e in bad.validate()), bad.validate())
+        ck("watermark_fixed_spec",
+           config.RuleConfig().time_format == config.WATERMARK_TIME_FORMAT
+           and config.RuleConfig().content_template == "{time}"
+           and config.RuleConfig.from_dict({"time_format": "%Y-%m-%d"}).time_format
+           == config.WATERMARK_TIME_FORMAT, config.WATERMARK_TIME_FORMAT)
+        ck("watermark_content_locked",
+           config.RuleConfig(output_dir=str(out), content_template="{filename} | {time}")
+           .apply_fixed_watermark().content_template == "{time}", "")
         ck("exif_diagnostics", hasattr(engine, "read_exif_datetime_ex"), "")
         # v1.1.0 客户合规门槛
         ck("guard_pixel_spec",
@@ -177,6 +184,10 @@ def _selftest(workdir: str) -> int:
                                     engine.STATUS_FAILED], statuses)
         ck("watermark_text", rs[0].watermark_text == "2026/05/22 16:29:01",
            rs[0].watermark_text)
+        # 水印内容只允许「yyyy/mm/dd hh:mm:ss」这 19 个字符，不附加任何文字或标识
+        ck("watermark_only_time_text",
+           bool(re.fullmatch(r"\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}",
+                             str(rs[0].watermark_text))), rs[0].watermark_text)
 
         summary = reporter.summarize(rs, cfg, started, datetime.now())
         paths = reporter.export_reports(rs, cfg, summary)

@@ -603,6 +603,9 @@ def process_one(source: str | Path, cfg: RuleConfig, seq: int,
 
     protected_paths：本批次全部源照片的规范化路径集合，防止输出覆盖其它源照片。
     """
+    # 时间水印由系统统一生成：入口处强制回写固定规格，
+    # 保证任何调用方（界面、规则文件、脚本）都无法改变水印内容、格式或外观。
+    cfg.apply_fixed_watermark()
     started = time.perf_counter()
     src = Path(source)
     r = ProcessResult(index=seq, source=str(src), filename=src.name)
