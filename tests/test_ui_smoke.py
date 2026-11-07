@@ -101,6 +101,18 @@ def main() -> int:
     assert app.required_filled == 3 and str(app.btn_start["state"]) == "normal"
     print("[2b] 必填项集中前置：未填满 3 项时禁用「开始批量处理」")
 
+    # 样品编号提示：不误伤 V1 短号、截断编号要提醒、完整串恢复常态
+    assert "完整串" in app.serial_hint.cget("text"), app.serial_hint.cget("text")
+    app.vars["serial_number"].set("T55B92BD20126B119X")
+    app.update()
+    assert "偏短" in app.serial_hint.cget("text"), app.serial_hint.cget("text")
+    app.vars["serial_number"].set(config.SERIAL_FULL_EXAMPLE)
+    app.update()
+    assert "完整串" in app.serial_hint.cget("text"), app.serial_hint.cget("text")
+    app.vars["serial_number"].set("TESTSERIAL")
+    app.update()
+    print("[2c] 样品编号提示：短号不误报、截断编号提醒、完整串恢复正常")
+
     # 恢复默认只作用于高级设置，必填信息与输出目录保持不变
     app.vars["jpeg_quality"].set("70")
     app._restore_advanced_defaults()

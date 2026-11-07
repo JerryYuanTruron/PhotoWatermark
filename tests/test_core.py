@@ -484,12 +484,27 @@ def main() -> int:
           f"{rl.status} {rl.reason[:80]}")
 
     named = fresh("naming")
+    full_no = config.SERIAL_FULL_EXAMPLE          # 当前样机：…B118X…
+    full_no_119 = full_no.replace("B118X", "B119X")  # 文档示例：…B119X…（同位置替换，不改顺序）
     cfg_name = C(output_dir=str(named), filename_template="{ecu}_{serial}_{seq}",
-                 ecu_name="EEPH", serial_number="T55B92BD20126B119X", start_index=7)
+                 ecu_name="EEPH", serial_number=full_no, start_index=7)
     rn = run([good], cfg_name)[0]
-    check("J6 合规命名生成 <ECU>_<序列号>_<四位序号>",
-          rn.ok and Path(rn.output_path).name == "EEPH_T55B92BD20126B119X_0007.jpg",
+    check("J6 合规命名生成 <ECU>_<完整样品编号>_<四位序号>",
+          rn.ok and Path(rn.output_path).name == f"EEPH_{full_no}_0007.jpg",
           Path(rn.output_path).name if rn.output_path else "")
+    # 样品编号必须原样进入文件名：B118X/B119X 段既不能丢、也不能被挪到串首/串尾
+    stem = Path(rn.output_path).stem if rn.output_path else ""
+    check("J6b 编号原样保留（B 段在串内原位、未截断未重排）",
+          stem == f"EEPH_{full_no}_0007"
+          and full_no in stem
+          and stem.index("B118X") > stem.index("T55B92BD20126")
+          and stem.endswith("0000119461114_0007"), stem)
+    cfg_119 = C(output_dir=str(fresh("naming119")), filename_template="{ecu}_{serial}_{seq}",
+                ecu_name="EEPH", serial_number=full_no_119, start_index=1)
+    r119 = run([good], cfg_119)[0]
+    check("J6c 另一批样品（B119X）同样按其完整编号命名",
+          r119.ok and Path(r119.output_path).name == f"EEPH_{full_no_119}_0001.jpg",
+          Path(r119.output_path).name if r119.output_path else "")
     check("J7 命名 token 未留字面量占位符",
           "{" not in Path(rn.output_path).name, rn.output_path)
 
