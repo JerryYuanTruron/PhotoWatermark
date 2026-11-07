@@ -134,6 +134,40 @@ def _selftest(workdir: str) -> int:
            engine.precheck_exif(p1) == ""
            and engine.precheck_exif(p2) == engine.EXIF_MISSING_REASON,
            engine.precheck_exif(p2))
+        # v1.1.2 导入阶段比例/方向校验的行为标记
+        ck("geometry_check_available",
+           hasattr(engine, "check_geometry") and hasattr(engine, "GeometryIssue")
+           and hasattr(engine, "geometry_notice_text"), "")
+        ck("geometry_compliant", engine.check_geometry(p1) is None, "")
+        p4 = work / "GEO_PORTRAIT_0004.jpg"
+        pic(900, 1200).save(p4, quality=95)
+        g4 = engine.check_geometry(p4)
+        ck("geometry_portrait_manual",
+           g4 is not None and g4.kind == "portrait_rotatable"
+           and g4.rotation == "manual" and "人工确认" in g4.advice
+           and "不指定方向" in g4.advice and "顺时针" not in g4.advice
+           and "逆时针" not in g4.advice, g4.brief if g4 else "")
+        p5 = work / "GEO_WIDE_0005.jpg"
+        pic(1600, 900).save(p5, quality=95)
+        g5 = engine.check_geometry(p5)
+        ck("geometry_ratio_advice",
+           g5 is not None and g5.kind == "landscape_ratio"
+           and all(w in g5.advice for w in ("仅旋转无法修正比例", "裁剪", "更换", "4:3")),
+           g5.brief if g5 else "")
+        ex6 = Image.Exif()
+        ex6[0x0112] = 6
+        p6 = work / "GEO_ORIENT6_0006.jpg"
+        pic(900, 1200).save(p6, quality=95, exif=ex6.tobytes())
+        g6 = engine.check_geometry(p6)
+        ck("geometry_direction_reliable",
+           g6 is not None and g6.rotation == "cw"
+           and "顺时针" in g6.advice and "无需手工旋转" in g6.advice,
+           g6.brief if g6 else "")
+        gnotice = engine.geometry_notice_text([x for x in (g4, g5, g6) if x])
+        ck("geometry_notice_wording",
+           "目标要求：符合 4:3 的横版照片" in gnotice
+           and all(n in gnotice for n in (p4.name, p5.name))
+           and "不阻断导入" in gnotice, "")
 
         used: set[str] = set()
         started = datetime.now()

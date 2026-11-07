@@ -66,6 +66,78 @@ EXIF_NOTICE_TITLE = "照片缺少 EXIF 信息"
 EXIF_NOTICE_MESSAGE = "缺少 EXIF 信息。请提供保留完整 EXIF 的原始照片。"
 EXIF_MISSING_REASON = "缺少 EXIF 信息，无法生成时间水印。请提供保留完整 EXIF 的原始照片。"
 
+# --------------------------------------------------------------------------
+# 导入阶段：比例与方向校验（目标要求为「符合 4:3 的横版照片」）
+#
+# 判定只依据文件内实际编码的像素宽高（Image.size），不依赖文件名、文件时间
+# 或任何照片来源信息。旋转方向的唯一可靠依据是 EXIF Orientation：
+#   6 → 需顺时针旋转 90° 才是正向（对应 Pillow exif_transpose 的 ROTATE_270）
+#   8 → 需逆时针旋转 90° 才是正向（对应 ROTATE_90）
+# 其余取值（含 0/1、镜像 2/4/5/7、180° 3）无法可靠判断 90° 旋转方向，
+# 一律要求操作人员人工确认，程序不指定方向。
+# --------------------------------------------------------------------------
+
+TARGET_ASPECT = 4.0 / 3.0
+ASPECT_TOLERANCE = 0.01                 # 宽高比相对容差 1%
+EXIF_TAG_ORIENTATION = 0x0112
+ORIENTATION_ROTATION = {6: "cw", 8: "ccw"}
+
+GEOMETRY_NOTICE_TITLE = "照片比例 / 方向检查"
+GEOMETRY_TARGET_LABEL = "目标要求：符合 4:3 的横版照片。"
+GEOMETRY_ROTATION_TEXT = {
+    # 带方向标记的照片引擎会自动按标记校正，须明确「无需手工旋转」以免重复旋转
+    "cw": "依据方向标记需顺时针旋转 90°；程序会自动校正，无需手工旋转",
+    "ccw": "依据方向标记需逆时针旋转 90°；程序会自动校正，无需手工旋转",
+    "manual": "旋转方向请人工确认，程序不指定方向",
+}
+GEOMETRY_RATIO_ADVICE = "仅旋转无法修正比例，请裁剪或更换为符合 4:3 的横版文件"
+GEOMETRY_UNREADABLE_ADVICE = "请确认文件可正常打开，或更换文件"
+GEOMETRY_NONBLOCKING_TEXT = "其余合格照片已正常导入，可继续批量处理；本提示不阻断导入。"
+
+
+@dataclass(frozen=True)
+class GeometryIssue:
+    """一张不符合「4:3 横版」要求的照片。"""
+
+    filename: str
+    width: int = 0
+    height: int = 0
+    orientation: int = 0
+    # portrait_rotatable | portrait_ratio | landscape_ratio | square | unreadable
+    kind: str = "unreadable"
+    # cw | ccw | manual | ""（仅 portrait_rotatable 有值）
+    rotation: str = ""
+
+    @property
+    def anomaly(self) -> str:
+        size = f"{self.width}×{self.height}"
+        return {
+            "portrait_rotatable": f"竖版 {size}（旋转 90° 后为 4:3 横版）",
+            "portrait_ratio": f"竖版 {size}，比例不是 4:3",
+            "landscape_ratio": f"横版 {size}，比例不是 4:3",
+            "square": f"正方形 {size}，比例不是 4:3",
+            "unreadable": "无法读取照片尺寸",
+        }.get(self.kind, "比例或方向不符合要求")
+
+    @property
+    def advice(self) -> str:
+        if self.kind == "unreadable":
+            return GEOMETRY_UNREADABLE_ADVICE
+        if self.kind == "portrait_rotatable":
+            return GEOMETRY_ROTATION_TEXT.get(self.rotation, GEOMETRY_ROTATION_TEXT["manual"])
+        return GEOMETRY_RATIO_ADVICE
+
+    @property
+    def brief(self) -> str:
+        return f"{self.anomaly}；{self.advice}"
+
+    @property
+    def rotation_reliable(self) -> bool:
+        return self.rotation in ("cw", "ccw")
+
+    def as_lines(self, index: int) -> str:
+        return f"{index:>2}. {self.filename}\n     {self.anomaly} → {self.advice}"
+
 
 @dataclass
 class ProcessResult:
@@ -206,6 +278,48 @@ def precheck_exif(path: str | Path) -> str:
     仅当 EXIF 中读不到任何拍摄日期时返回统一提示文案。
     """
     return "" if has_exif_capture_time(path) else EXIF_MISSING_REASON
+
+
+def _is_4_3(ratio: float) -> bool:
+    return abs(ratio - TARGET_ASPECT) <= TARGET_ASPECT * ASPECT_TOLERANCE
+
+
+def check_geometry(path: str | Path) -> GeometryIssue | None:
+    """导入阶段校验比例与方向；返回 None 表示符合「4:3 横版」要求。
+
+    - 横版且宽高比 4:3（±1%）→ 合格
+    - 竖版且高宽比 4:3 → 旋转 90° 即可满足；方向仅在 EXIF Orientation 为 6/8
+      时可靠给出，否则标记为需人工确认（不指定方向）
+    - 其余（比例不符的竖版 / 横版、正方形、无法读取）→ 仅旋转无法修正比例
+    """
+    p = Path(path)
+    try:
+        with Image.open(p) as im:
+            w, h = int(im.size[0]), int(im.size[1])
+            try:
+                orientation = int(im.getexif().get(EXIF_TAG_ORIENTATION, 0) or 0)
+            except (TypeError, ValueError, AttributeError):
+                orientation = 0
+    except (OSError, ValueError, UnidentifiedImageError):
+        return GeometryIssue(p.name, kind="unreadable")
+    if w <= 0 or h <= 0:
+        return GeometryIssue(p.name, kind="unreadable")
+    if w > h and _is_4_3(w / h):
+        return None
+    if h > w and _is_4_3(h / w):
+        return GeometryIssue(p.name, w, h, orientation, "portrait_rotatable",
+                             ORIENTATION_ROTATION.get(orientation, "manual"))
+    kind = "portrait_ratio" if h > w else ("square" if w == h else "landscape_ratio")
+    return GeometryIssue(p.name, w, h, orientation, kind, "")
+
+
+def geometry_notice_text(issues: list[GeometryIssue]) -> str:
+    """提示窗口正文的唯一文案来源（GUI、测试、命令行自检共用）。"""
+    lines = [f"发现 {len(issues)} 张照片不符合导入要求。", GEOMETRY_TARGET_LABEL, ""]
+    for i, issue in enumerate(issues, 1):
+        lines.append(issue.as_lines(i))
+    lines.extend(["", GEOMETRY_NONBLOCKING_TEXT])
+    return "\n".join(lines)
 
 
 def format_content(template: str, time_text: str, stem: str, seq: int,

@@ -42,11 +42,15 @@ from .engine import (
     EXIF_MISSING_REASON,
     EXIF_NOTICE_MESSAGE,
     EXIF_NOTICE_TITLE,
+    GEOMETRY_NOTICE_TITLE,
     STATUS_FAILED,
     STATUS_SKIPPED,
     STATUS_SUCCESS,
     STATUS_WARNING,
+    GeometryIssue,
     ProcessResult,
+    check_geometry,
+    geometry_notice_text,
     has_exif_capture_time,
     process_one,
 )
@@ -149,6 +153,61 @@ class MappedCombo(ttk.Combobox):
         self.set(self._fwd.get(value, value))
 
 
+def show_geometry_notice(parent: tk.Misc, issues: list[GeometryIssue]) -> tk.Toplevel:
+    """导入时的比例/方向提示窗口：非模态、可滚动，不阻断其余照片继续导入。
+
+    正文由 engine.geometry_notice_text() 统一提供（GUI / 测试 / 自检共用同一文案）。
+    这里不使用 grab_set，窗口弹出后主窗口仍可操作、已导入的合格照片照常保留。
+    """
+    win = tk.Toplevel(parent)
+    win.title(GEOMETRY_NOTICE_TITLE)
+    win.configure(bg="#F5F7FA")
+    width = 860
+    height = min(620, max(360, 220 + 30 * len(issues)))
+    try:
+        px, py = parent.winfo_rootx(), parent.winfo_rooty()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        sw, sh = parent.winfo_screenwidth(), parent.winfo_screenheight()
+        x = px + (pw - width) // 2
+        y = py + (ph - height) // 2
+        # 主窗口高于屏幕时，居中会把底部按钮挤出屏幕；钳制到可视区域内
+        x = max(0, min(x, max(0, sw - width)))
+        y = max(0, min(y, max(0, sh - height - 40)))
+        win.geometry(f"{width}x{height}+{x}+{y}")
+    except tk.TclError:
+        win.geometry(f"{width}x{height}")
+    win.minsize(700, 320)
+    try:
+        win.transient(parent)  # 仅保持在父窗口之上，不设置模态抓取
+    except tk.TclError:
+        pass
+
+    head = tk.Frame(win, bg="#F5F7FA")
+    head.pack(fill="x", padx=14, pady=(12, 2))
+    tk.Label(head, text=f"发现 {len(issues)} 张照片不符合导入要求",
+             bg="#F5F7FA", fg="#A8410E",
+             font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
+
+    body = tk.Frame(win, bg="#F5F7FA")
+    body.pack(fill="both", expand=True, padx=14, pady=(6, 4))
+    txt = tk.Text(body, wrap="word", bg="#FFFFFF", fg="#1F2933",
+                  font=("Microsoft YaHei UI", 9), relief="solid", borderwidth=1,
+                  padx=8, pady=6)
+    sb = ttk.Scrollbar(body, orient="vertical", command=txt.yview)
+    txt.configure(yscrollcommand=sb.set)
+    sb.pack(side="right", fill="y")
+    txt.pack(side="left", fill="both", expand=True)
+    txt.insert("1.0", geometry_notice_text(issues))
+    txt.configure(state="disabled")
+
+    foot = tk.Frame(win, bg="#F5F7FA")
+    foot.pack(fill="x", padx=14, pady=(4, 12))
+    ttk.Button(foot, text="知道了", command=win.destroy).pack(side="right")
+    win.protocol("WM_DELETE_WINDOW", win.destroy)
+    win.lift()
+    return win
+
+
 # --------------------------------------------------------------------------
 # 主窗口
 # --------------------------------------------------------------------------
@@ -167,6 +226,10 @@ class App(tk.Tk):
         self.invalid_fields: list[str] = []
         self.precheck: dict[str, str] = {}
         self.exif_notified: set[str] = set()   # 已弹窗提示过的缺 EXIF 照片，避免重复弹窗
+        # 比例/方向校验：按路径缓存结果（None = 符合 4:3 横版），避免重复解码大图
+        self.geometry: dict[str, GeometryIssue | None] = {}
+        self.geometry_notified: set[str] = set()
+        self.geometry_window: tk.Toplevel | None = None
         self.files: list[str] = []
         self.results: list[ProcessResult] = []
         self.summary: BatchSummary | None = None
@@ -254,8 +317,9 @@ class App(tk.Tk):
         note = ttk.Label(
             bar,
             text="客户合规口径：默认「不缩放」保持原分辨率并强制校验成品 ≥2100 万像素；"
-                 "缺少 EXIF 信息时弹出提示窗口；文件名按 <ECU>_<序列号>_<四位序号> 生成，"
-                 "请先在「输出与合规命名」填写 ECU 名称与序列号。报告插图副本为可选，不满足像素要求。",
+                 "导入时校验 4:3 横版比例与方向、缺少 EXIF 信息时分别弹出提示窗口（不阻断其余照片导入）；"
+                 "文件名按 <ECU>_<序列号>_<四位序号> 生成，请先在「输出与合规命名」填写 ECU 名称与序列号。"
+                 "报告插图副本为可选，不满足像素要求。",
             foreground="#9A5B00", wraplength=1180, justify="left")
         note.pack(fill="x", pady=(4, 0))
 
@@ -563,12 +627,21 @@ class App(tk.Tk):
                 added += 1
         self._refresh_import_count()
         self._run_precheck()
+        self._run_geometry_check()
         self._rebuild_pending_rows()
+        # 先弹非模态的比例/方向窗口，再弹 EXIF 提示；两者都不移除任何已导入照片
+        self._notify_geometry()
         self._notify_missing_exif()
         bad = sum(1 for v in self.precheck.values() if v)
+        geo_bad = sum(1 for v in self.geometry.values() if v)
         head = f"导入 {added} 张（去重后共 {len(self.files)} 张）；无需逐张设置。"
-        self._set_status(head + (f" 其中 {bad} 张缺少 EXIF 信息，已弹出提示并列入待处理清单。"
-                                if bad else " 全部含 EXIF 信息，可开始批量处理。"))
+        notes = []
+        if bad:
+            notes.append(f"{bad} 张缺少 EXIF 信息（已弹窗提示）")
+        if geo_bad:
+            notes.append(f"{geo_bad} 张比例/方向不符合 4:3 横版（已弹窗列出）")
+        self._set_status(head + ((" 其中 " + "，".join(notes) + "。") if notes
+                                 else " 全部通过 EXIF 与 4:3 横版检查。"))
         if added:
             self.nb.select(self.tab_results)
 
@@ -595,6 +668,37 @@ class App(tk.Tk):
         self.exif_notified.update(fresh)
         messagebox.showwarning(EXIF_NOTICE_TITLE, EXIF_NOTICE_MESSAGE)
 
+    def _run_geometry_check(self) -> None:
+        """导入阶段校验比例与方向；只校验新增文件，结果按路径缓存。
+
+        固定行为，不受任何配置项影响；不合格照片仍保留在导入列表中，
+        仅做标记与提示，不移除、不阻断其余合格照片。
+        """
+        current = set(self.files)
+        for p in self.files:
+            if p not in self.geometry:
+                self.geometry[p] = check_geometry(p)
+        for p in list(self.geometry):
+            if p not in current:
+                self.geometry.pop(p, None)
+
+    def _notify_geometry(self) -> None:
+        """发现新增的不合格照片时弹出一次非模态提示窗口，列出当前全部受影响文件。"""
+        fresh = [p for p, issue in self.geometry.items()
+                 if issue is not None and p not in self.geometry_notified]
+        if not fresh:
+            return
+        self.geometry_notified.update(fresh)
+        issues = [self.geometry[p] for p in self.files if self.geometry.get(p)]
+        # 复用同一个窗口，避免多次导入堆叠出多个提示窗口
+        if self.geometry_window is not None:
+            try:
+                self.geometry_window.destroy()
+            except tk.TclError:
+                pass
+            self.geometry_window = None
+        self.geometry_window = show_geometry_notice(self, issues)
+
     def _clear_files(self) -> None:
         if self.busy:
             return
@@ -602,6 +706,14 @@ class App(tk.Tk):
         self.results.clear()
         self.precheck.clear()
         self.exif_notified.clear()
+        self.geometry.clear()
+        self.geometry_notified.clear()
+        if self.geometry_window is not None:
+            try:
+                self.geometry_window.destroy()
+            except tk.TclError:
+                pass
+            self.geometry_window = None
         self.summary = None
         self.report_paths.clear()
         self.tree.delete(*self.tree.get_children())
@@ -615,11 +727,17 @@ class App(tk.Tk):
     def _rebuild_pending_rows(self) -> None:
         self.tree.delete(*self.tree.get_children())
         for i, p in enumerate(self.files, 1):
-            issue = self.precheck.get(p, "")
+            exif_issue = self.precheck.get(p, "")
+            geo_issue = self.geometry.get(p)
+            if exif_issue:
+                status, stage, reason, tag = "缺少 EXIF", "EXIF 检查", exif_issue, "warn"
+            elif geo_issue:
+                status, stage, reason, tag = "比例异常", "导入检查", geo_issue.brief, "warn"
+            else:
+                status, stage, reason, tag = "待处理", "", "", "pending"
             self.tree.insert("", "end", iid=str(i),
-                             values=(i, Path(p).name, "", "缺少 EXIF" if issue else "待处理",
-                                     "EXIF 检查" if issue else "", issue, ""),
-                             tags=("warn",) if issue else ("pending",))
+                             values=(i, Path(p).name, "", status, stage, reason, ""),
+                             tags=(tag,))
         self.progress.configure(maximum=max(1, len(self.files)), value=0)
         self.progress_label.configure(text=f"0 / {len(self.files)}")
 
