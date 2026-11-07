@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from pathlib import Path
@@ -31,7 +32,7 @@ RESIZE_MODES = {
 }
 
 OUTPUT_FORMATS = {
-    "同原格式": "同原格式（JPG→JPEG / PNG→PNG）",
+    "同原格式": "同原格式（JPG→JPEG / PNG→PNG；TIF/BMP/WEBP→JPEG）",
     "JPEG": "JPEG",
     "PNG": "PNG",
 }
@@ -51,7 +52,7 @@ POSITIONS = {
 EXIF_POLICIES = {
     "fail": "判定失败并列入失败清单（推荐）",
     "use_file_mtime": "回退到文件修改时间（标记警告）",
-    "no_watermark": "跳过该张水印（标记警告）",
+    "no_watermark": "跳过水印并判失败（成品无时间戳，不推荐）",
 }
 
 ON_EXISTS = {
@@ -71,7 +72,7 @@ TIME_FORMAT_PRESETS: list[tuple[str, str]] = [
 
 FILENAME_TEMPLATE_PRESETS: list[tuple[str, str]] = [
     ("{name}_结果", "{name}_结果（文档 3.9 截图）"),
-    ("{name}", "{name}（保持原名，符合第 10 节命名规范）"),
+    ("{name}", "{name}（保持原名，不追加 _结果 后缀）"),
     ("{name}_{seq}", "{name}_{seq}（原名 + 四位序号）"),
     ("{seq}_{name}", "{seq}_{name}（四位序号 + 原名）"),
 ]
@@ -232,6 +233,8 @@ class RuleConfig:
                     e.append(f"时间格式含不支持的指令：%{unknown[0]}（请检查拼写）")
             if not self.content_template.strip():
                 e.append("水印内容模板不能为空")
+            elif self.time_source != "fixed" and "{time}" not in self.content_template:
+                e.append("时间来源非「固定文本」时，水印内容模板必须包含 {time}，否则成品不含时间戳")
             if self.position not in POSITIONS:
                 e.append(f"水印位置非法：{self.position}")
             if not _valid_hex_color(self.font_color) or not _valid_hex_color(self.shadow_color):
@@ -242,12 +245,18 @@ class RuleConfig:
                 e.append("字号单位须为 px 或 pt")
             if not 0 <= self.font_opacity <= 100 or not 0 <= self.shadow_opacity <= 100:
                 e.append("不透明度须在 0–100 之间")
+            if self.font_opacity < 1:
+                e.append("字体不透明度不能为 0：时间水印必须肉眼可见（文档「每张照片须包含可见时间戳」）")
+            if self.font_opacity < 1 and self.shadow_opacity < 1:
+                e.append("字体与阴影都不透明时水印不可见")
             if self.margin_x < 0 or self.margin_y < 0:
                 e.append("边距不能为负")
             if self.shadow_blur < 0:
                 e.append("阴影模糊不能为负")
+            if self.font_path.strip() and not Path(self.font_path).is_file():
+                e.append(f"自定义字体文件不存在：{self.font_path}")
             if not resolve_font(self.font_family, self.font_path):
-                e.append(f"字体不可用：{self.font_family or self.font_path}（请改用其他字体或指定字体文件）")
+                e.append(f"本机无可用字体：{self.font_family or self.font_path}（请安装字体或指定字体文件）")
 
         if not self.output_dir.strip():
             e.append("请指定输出目录")
@@ -261,10 +270,12 @@ class RuleConfig:
             e.append(f"同名策略非法：{self.on_exists}")
         if self.missing_exif_policy not in EXIF_POLICIES:
             e.append(f"EXIF 缺失策略非法：{self.missing_exif_policy}")
-        if self.start_index < 0:
-            e.append("起始序号不能为负")
+        if self.start_index < 1:
+            e.append("起始序号须 ≥ 1")
         if self.min_output_bytes < 0:
             e.append("校验阈值不能为负")
+        if self.max_source_pixels < 1_000_000:
+            e.append("源图像素安全上限过小")
         return e
 
     def effective_font_px(self) -> int:
@@ -279,10 +290,26 @@ def _valid_hex_color(value: str) -> bool:
 
 
 def _path_writable(value: str) -> bool:
+    """真实写探针：只 mkdir 无法发现「目录存在但只读」的情况，会导致整批在导出阶段才失败。"""
     try:
         p = Path(value)
         p.mkdir(parents=True, exist_ok=True)
-        return p.is_dir()
+        if not p.is_dir():
+            return False
+        probe = p / f"._pw_probe_{os.getpid()}_{os.urandom(4).hex()}.tmp"
+        try:
+            probe.write_bytes(b"ok")
+        finally:
+            # Windows 安全软件可能短暂占用刚写入的文件；重试删除，避免输出目录留垃圾
+            for _ in range(6):
+                try:
+                    probe.unlink()
+                    break
+                except FileNotFoundError:
+                    break
+                except OSError:
+                    time.sleep(0.03)
+        return True
     except OSError:
         return False
 
@@ -346,7 +373,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "font_size": 70, "font_size_unit": "px", "position": "bottom_right",
         "time_format": "%Y/%m/%d %H:%M:%S", "filename_template": "{name}_结果",
     },
-    "高像素归档 · 保持原尺寸（满足≥2100万像素）": {
+    "高像素归档 · 保持原尺寸（不缩放，需自行核对像素数）": {
         "resize_mode": "none", "dpi": 300, "output_format": "同原格式",
         "jpeg_quality": 95, "font_size": 160, "font_size_unit": "px",
         "filename_template": "{name}_结果",

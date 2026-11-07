@@ -94,6 +94,26 @@ def main() -> int:
     ck("0.4 BUILD_INFO git HEAD == 当前 HEAD",
        bool(m_head) and m_head.group(1) == git_head(),
        f"构建={m_head.group(1) if m_head else '?'}, 当前={git_head()}")
+    m_dirty = re.search(r"^git_dirty\s*:\s*(\S+)", info, re.M)
+    ck("0.5 构建时源码工作区干净", bool(m_dirty) and m_dirty.group(1) == "False",
+       m_dirty.group(1) if m_dirty else "未找到")
+    m_exe_sha = re.search(r"^exe_sha256\s*:\s*(\S+)", info, re.M)
+    import hashlib as _hashlib
+    ck("0.6 交付 exe 的 sha256 == BUILD_INFO 记录",
+       bool(m_exe_sha) and m_exe_sha.group(1) == _hashlib.sha256(EXE.read_bytes()).hexdigest(),
+       "exe 与构建档案不匹配（可能被替换或重新打包过）")
+    # 源码哈希：检测「构建之后源码被改动」或「exe 是旧代码」
+    recorded = dict(re.findall(r"^  (\S+\.py) = ([0-9a-f]{64})$", info, re.M))
+    current = {"main.py": _hashlib.sha256((ROOT / "main.py").read_bytes()).hexdigest()}
+    current.update({p.name: _hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in sorted((ROOT / "src").glob("*.py"))})
+    ck("0.7 BUILD_INFO 源码哈希集合完整", set(recorded) == set(current),
+       f"记录={sorted(recorded)}, 当前={sorted(current)}")
+    drift = [k for k in current if recorded.get(k) != current[k]]
+    ck("0.8 构建后源码零漂移", not drift, f"漂移文件={drift}")
+    if drift:
+        print("[FATAL] exe 不是由当前源码构建，中止后续断言")
+        return 1
 
     with tempfile.TemporaryDirectory(prefix="pw_frozen_") as td:
         work = Path(td)
@@ -126,6 +146,11 @@ def main() -> int:
             ck(f"2.5 冻结链路 / {name}", item.get("ok") is True, item.get("detail"))
         ck("2.6 无自检错误", data.get("ok") is True and not data.get("errors"),
            data.get("errors"))
+        for marker in ("guard_invisible_watermark", "guard_missing_time_token",
+                       "exif_diagnostics", "no_temp_residue", "attempted_output_recorded"):
+            item = (data.get("checks") or {}).get(marker, {})
+            ck(f"2.7 产物含本版行为标记 / {marker}", item.get("ok") is True,
+               item.get("detail", "缺失"))
 
         # --- [3] 双击无参数启动：实测顶层窗口 ---
         proc = subprocess.Popen([str(EXE)], cwd=str(work),

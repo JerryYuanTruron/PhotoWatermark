@@ -89,6 +89,14 @@ def _selftest(workdir: str) -> int:
         cfg = config.RuleConfig()
         cfg.output_dir = str(out)
         ck("config_valid", cfg.validate() == [], cfg.validate())
+        # 行为标记：确认 exe 内确实是本版代码（而非旧包配了新 BUILD_INFO）
+        bad = config.RuleConfig(output_dir=str(out), font_opacity=0)
+        ck("guard_invisible_watermark",
+           any("字体不透明度" in e for e in bad.validate()), bad.validate())
+        ck("guard_missing_time_token",
+           any("{time}" in e for e in config.RuleConfig(
+               output_dir=str(out), content_template="PHOTO OK").validate()), "")
+        ck("exif_diagnostics", hasattr(engine, "read_exif_datetime_ex"), "")
 
         used: set[str] = set()
         started = datetime.now()
@@ -109,6 +117,13 @@ def _selftest(workdir: str) -> int:
 
         produced = list(out.glob("*.jpg"))
         ck("only_good_outputs", len(produced) == 1, [x.name for x in produced])
+        # 只核对「本次导出产生的临时文件」；配置写探针属于另一类，且可能来自
+        # 复用同一工作目录的上一次运行，不应污染本条断言。
+        residue = [x.name for x in out.glob("._pw_*") if "_probe_" not in x.name]
+        ck("no_temp_residue", not residue, residue)
+        ck("attempted_output_recorded",
+           all(x.attempted_output for x in rs if x.ok),
+           [x.attempted_output for x in rs if x.ok])
         if produced:
             with Image.open(produced[0]) as im:
                 ck("output_size", im.size == (2400, 1800), im.size)

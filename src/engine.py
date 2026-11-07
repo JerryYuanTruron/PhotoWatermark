@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from .config import (
     POSITIONS,
     SUPPORTED_INPUT_EXTS,
     RuleConfig,
+    list_system_fonts,
     resolve_font,
 )
 
@@ -54,6 +56,8 @@ POS_ANCHORS = {
 }
 
 ILLEGAL_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]')
+MAX_FILENAME_CHARS = 120          # 单文件名上限，避免 Windows 260 字符路径限制
+MIN_VISIBLE_WM_PIXELS = 20        # 水印区域至少要有这么多个像素被明显改变
 
 
 @dataclass
@@ -75,6 +79,8 @@ class ProcessResult:
     duration_ms: int = 0
     verified: bool = False
     watermark_rect: tuple[int, int, int, int] | None = None
+    # 无论成功失败都记录「本次尝试写出的路径」，供批次审计反向核对残留成品
+    attempted_output: str = ""
 
     @property
     def ok(self) -> bool:
@@ -86,8 +92,8 @@ class ProcessResult:
             "原文件名": self.filename,
             "原文件路径": self.source,
             "状态": self.status,
-            "失败阶段": self.stage if self.status == STATUS_FAILED else "",
-            "失败原因": self.reason if self.status == STATUS_FAILED else "",
+            "失败阶段": self.stage if self.status in (STATUS_FAILED, STATUS_SKIPPED) else "",
+            "失败原因": self.reason if self.status in (STATUS_FAILED, STATUS_SKIPPED, STATUS_WARNING) else "",
             "警告/说明": "；".join(self.warnings),
             "原尺寸": self.original_size,
             "输出尺寸": self.output_size,
@@ -114,8 +120,12 @@ def hex_to_rgb(value: str) -> tuple[int, int, int]:
     return int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16)
 
 
-def read_exif_datetime(exif: Image.Exif) -> tuple[datetime | None, str]:
-    """按文档 3.6 读取「拍摄日期」。返回 (datetime, 命中的字段名)。"""
+def read_exif_datetime_ex(exif: Image.Exif) -> tuple[datetime | None, str, str]:
+    """按文档 3.6 读取「拍摄日期」。
+
+    返回 (datetime, 命中字段, 偏差说明)。文档要求的是 DateTimeOriginal(拍摄日期)；
+    命中其它字段或 DateTimeOriginal 本身损坏时，必须显式报告偏差，禁止静默换字段。
+    """
     candidates: list[tuple[int, Any, str]] = []
     try:
         sub = exif.get_ifd(EXIF_IFD_EXIF) or {}
@@ -129,11 +139,26 @@ def read_exif_datetime(exif: Image.Exif) -> tuple[datetime | None, str]:
     v = exif.get(EXIF_TAG_DATETIME)
     if v:
         candidates.append((2, v, "DateTime"))
-    for _, raw, label in sorted(candidates, key=lambda x: x[0]):
+    ordered = sorted(candidates, key=lambda x: x[0])
+    original_raw = next((raw for _, raw, label in ordered if label == "DateTimeOriginal"), None)
+    original_bad = original_raw is not None and _parse_exif_dt(original_raw) is None
+    for _, raw, label in ordered:
         dt = _parse_exif_dt(raw)
         if dt:
-            return dt, label
-    return None, ""
+            note = ""
+            if label != "DateTimeOriginal":
+                note = (f"未找到有效的 EXIF 拍摄日期(DateTimeOriginal)，已回退使用 {label}"
+                        f"（非拍摄日期，可能不代表实际拍摄时间）")
+                if original_bad:
+                    note = f"EXIF DateTimeOriginal 存在但格式非法；{note}"
+            return dt, label, note
+    return None, "", ""
+
+
+def read_exif_datetime(exif: Image.Exif) -> tuple[datetime | None, str]:
+    """兼容接口：返回 (datetime, 命中字段)，忽略偏差说明。"""
+    dt, tag, _ = read_exif_datetime_ex(exif)
+    return dt, tag
 
 
 def _parse_exif_dt(raw: Any) -> datetime | None:
@@ -169,36 +194,53 @@ def build_output_path(
     extension: str,
     time_text: str,
     used: set[str],
+    protected: set[str] | None = None,
 ) -> Path:
+    """生成输出路径。
+
+    protected = 本批次**全部**源照片的规范化路径集合。输出绝不能覆盖其中任何一个，
+    否则「输出目录 = 源目录」时，后处理的源照片会被前一张的成品静默替换（原始证据丢失）。
+    """
     stem = source.stem
     name = format_content(cfg.filename_template, safe_filename_part(time_text), stem,
                           cfg.start_index + seq - 1)
     name = safe_filename_part(name) or stem
+    name = name[:MAX_FILENAME_CHARS]  # 防止模板过长触发 OS 路径长度错误
     out_dir = Path(cfg.output_dir)
     candidate = out_dir / f"{name}{extension}"
+    prot = protected if protected is not None else {str(source.resolve()).lower()}
 
-    # 绝不覆盖原始照片
-    try:
-        if candidate.resolve() == source.resolve():
-            candidate = out_dir / f"{name}_结果{extension}"
-    except OSError:
-        pass
+    def collides(p: Path) -> bool:
+        try:
+            return str(p.resolve()).lower() in prot
+        except OSError:
+            return False
+
+    if collides(candidate):
+        candidate = out_dir / f"{name}_结果{extension}"
 
     key = str(candidate).lower()
-    if key in used:
-        candidate = _unique_path(candidate, used)
-    elif candidate.exists():
-        if cfg.on_exists == "rename":
-            candidate = _unique_path(candidate, used)
-        # overwrite / skip 交由调用方处理
+    need_unique = key in used or collides(candidate) or (
+        candidate.exists() and cfg.on_exists == "rename")
+    if need_unique:
+        candidate = _unique_path(candidate, used, prot)
     used.add(str(candidate).lower())
     return candidate
 
 
-def _unique_path(base: Path, used: set[str]) -> Path:
+def _unique_path(base: Path, used: set[str], protected: set[str] | None = None) -> Path:
+    prot = protected or set()
+
+    def free(p: Path) -> bool:
+        try:
+            return (str(p.resolve()).lower() not in prot
+                    and str(p).lower() not in used and not p.exists())
+        except OSError:
+            return False
+
     for i in range(1, 10000):
         p = base.with_name(f"{base.stem}_{i}{base.suffix}")
-        if str(p).lower() not in used and not p.exists():
+        if free(p):
             return p
     return base.with_name(f"{base.stem}_{int(time.time() * 1000)}{base.suffix}")
 
@@ -268,6 +310,16 @@ def _stage_watermark(
     warnings: list[str] = []
     if not cfg.watermark_enabled or not text:
         return base, None, warnings
+    # 运行期也拦截（引擎可被命令行/测试直接调用，不经过 config.validate）
+    if cfg.font_opacity < 1:
+        raise RuntimeError("字体不透明度为 0：文字不可见（仅阴影可见），不满足可见时间戳要求")
+
+    available = {label for label, _ in list_system_fonts()}
+    if cfg.font_path and not Path(cfg.font_path).is_file():
+        warnings.append("自定义字体文件不存在，已回退到系统字体")
+    elif not cfg.font_path and cfg.font_family not in available:
+        fallback = resolve_font(cfg.font_family, "")
+        warnings.append(f"配置的字体「{cfg.font_family}」在本机不存在，已回退到 {Path(fallback).name}")
 
     font, tw, th, shrunk = _load_font(cfg, text, base.width)
     if shrunk:
@@ -318,21 +370,30 @@ def _stage_watermark(
     out = base.copy()
     region = Image.alpha_composite(out.crop((px0, py0, px1, py1)).convert("RGBA"), layer).convert("RGB")
     out.paste(region, (px0, py0))
-    # 渲染有效性自检：水印区域必须与渲染前存在差异
-    if ImageChops.difference(base.crop(rect), out.crop(rect)).getbbox() is None:
-        raise RuntimeError("水印区域像素未发生变化（颜色与底层相同或透明度为 0）")
+    # 渲染有效性自检：水印区域必须发生「足量、肉眼可辨」的变化。
+    # 只判 getbbox() 会被「文字全透明但有阴影」「1 像素差异」等配置绕过。
+    diff = ImageChops.difference(base.crop(rect), out.crop(rect)).convert("L")
+    changed = sum(1 for px in diff.getdata() if px > 8)
+    need = max(MIN_VISIBLE_WM_PIXELS, int(diff.width * diff.height * 0.01))
+    if changed < need:
+        raise RuntimeError(
+            f"水印不可见或过淡（仅 {changed} 个像素发生可见变化，需要 ≥{need}）；"
+            "请检查字体不透明度、字体色与水印内容")
     return out, rect, warnings
 
 
 def _save_image(img: Image.Image, path: Path, fmt: str, cfg: RuleConfig,
-                raw_exif: bytes) -> list[str]:
-    """导出。保持元数据（文档 3.9 输出页签「保持元数据」）。"""
+                raw_exif: bytes, icc_profile: bytes | None = None) -> list[str]:
+    """导出。保留 EXIF 与 ICC（文档 3.9 输出页签「保持元数据」）。"""
     warnings: list[str] = []
     opts: dict[str, Any] = {"dpi": (cfg.dpi, cfg.dpi)}
     if fmt == "JPEG":
         opts.update(quality=cfg.jpeg_quality, optimize=True, subsampling=0)
-    if cfg.keep_metadata and raw_exif:
-        opts["exif"] = raw_exif
+    if cfg.keep_metadata:
+        if raw_exif:
+            opts["exif"] = raw_exif
+        if icc_profile:
+            opts["icc_profile"] = icc_profile
     try:
         img.save(path, format=fmt, **opts)
     except (TypeError, ValueError) as exc:
@@ -384,144 +445,172 @@ def _verify_output(path: Path, expected_size: tuple[int, int], fmt: str,
 
 
 def process_one(source: str | Path, cfg: RuleConfig, seq: int,
-                used_names: set[str]) -> ProcessResult:
-    """处理单张照片，永不抛出未捕获异常；所有失败以 ProcessResult 返回。"""
+                used_names: set[str], protected_paths: set[str] | None = None) -> ProcessResult:
+    """处理单张照片，永不抛出未捕获异常；所有失败以 ProcessResult 返回。
+
+    protected_paths：本批次全部源照片的规范化路径集合，防止输出覆盖其它源照片。
+    """
     started = time.perf_counter()
     src = Path(source)
     r = ProcessResult(index=seq, source=str(src), filename=src.name)
     out_path: Path | None = None
+    tmp_path: Path | None = None
+
+    def abort(stage: str, reason: str) -> ProcessResult:
+        """统一失败出口：任何失败路径都清理本次临时/残留文件，杜绝「判失败但已产出」。"""
+        _cleanup(tmp_path)
+        return _fail(r, stage, reason)
 
     try:
         # --- 阶段 1：导入解码（文档 3.3） ---
         if not src.exists():
-            return _fail(r, STAGE_IMPORT, "文件不存在或已被移动")
+            return abort(STAGE_IMPORT, "文件不存在或已被移动")
         if not src.is_file():
-            return _fail(r, STAGE_IMPORT, "目标不是文件（可能是目录）")
+            return abort(STAGE_IMPORT, "目标不是文件（可能是目录）")
         if src.suffix.lower() not in SUPPORTED_INPUT_EXTS:
-            return _fail(r, STAGE_IMPORT,
+            return abort(STAGE_IMPORT,
                          f"不支持的文件格式 {src.suffix or '(无扩展名)'}；仅支持 JPG/PNG/BMP/TIF/WEBP")
         try:
             raw = Image.open(src)
             raw.load()
         except UnidentifiedImageError:
-            return _fail(r, STAGE_IMPORT, "文件无法识别为图片（内容损坏或格式伪装）")
+            return abort(STAGE_IMPORT, "文件无法识别为图片（内容损坏或格式伪装）")
         except Image.DecompressionBombError:
-            return _fail(r, STAGE_IMPORT, "图片像素过大，触发解压保护，疑似异常文件")
+            return abort(STAGE_IMPORT, "图片像素过大，触发解压保护，疑似异常文件")
         except OSError as exc:
-            return _fail(r, STAGE_IMPORT, f"图片解码失败（文件可能截断或损坏）：{exc}")
+            return abort(STAGE_IMPORT, f"图片解码失败（文件可能截断或损坏）：{exc}")
         r.original_size = f"{raw.width}×{raw.height}"
         if raw.width * raw.height > cfg.max_source_pixels:
-            return _fail(r, STAGE_IMPORT,
+            return abort(STAGE_IMPORT,
                          f"源图像素 {raw.width * raw.height:,} 超过安全上限 {cfg.max_source_pixels:,}")
 
         # EXIF 读取必须在 exif_transpose 之前（transpose 会清理方向标签）
         try:
             exif_obj = raw.getexif()
-            exif_dt, exif_tag = read_exif_datetime(exif_obj)
+            exif_dt, exif_tag, exif_note = read_exif_datetime_ex(exif_obj)
         except Exception:
-            exif_dt, exif_tag = None, ""
+            exif_dt, exif_tag, exif_note = None, "", ""
+        icc_profile = raw.info.get("icc_profile") if isinstance(raw.info.get("icc_profile"), bytes) else None
         try:
             oriented = ImageOps.exif_transpose(raw)
         except Exception as exc:
-            return _fail(r, STAGE_IMPORT, f"EXIF 方向校正失败：{exc}")
+            return abort(STAGE_IMPORT, f"EXIF 方向校正失败：{exc}")
         raw_exif = oriented.info.get("exif", b"") if isinstance(oriented.info.get("exif"), bytes) else b""
         del raw  # 释放大图内存；oriented 为独立副本，不调用 close() 以免误关共享句柄
 
         # --- 阶段 2：时间源（文档 3.6 / 3.7） ---
         time_text = ""
         name_time_text = datetime.fromtimestamp(src.stat().st_mtime).strftime("%Y-%m-%d_%H%M%S")
-        skip_watermark = False
         if cfg.watermark_enabled:
             dt: datetime | None = None
             if cfg.time_source == "exif":
                 dt, tag = exif_dt, exif_tag
                 if dt is None:
                     if cfg.missing_exif_policy == "fail":
-                        return _fail(r, STAGE_TIME,
+                        return abort(STAGE_TIME,
                                      "缺少 EXIF 拍摄日期（DateTimeOriginal / DateTimeDigitized / DateTime 均未找到），"
                                      "无法按文档 3.6 生成时间水印")
                     if cfg.missing_exif_policy == "use_file_mtime":
                         dt = datetime.fromtimestamp(src.stat().st_mtime)
-                        r.warnings.append("缺失 EXIF 拍摄日期，按策略回退到文件修改时间（非拍摄时间）")
-                    else:
-                        skip_watermark = True
-                        r.warnings.append("缺失 EXIF 拍摄日期，按策略跳过该张水印（该张不满足「每张含可见时间戳」）")
-                r.capture_time = dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+                        r.warnings.append("缺失 EXIF 拍摄日期，按策略回退到文件修改时间，非 EXIF 拍摄日期")
+                    else:  # no_watermark：成品无时间戳，按不合格处理，不计入成功
+                        return abort(STAGE_TIME,
+                                     "按策略「跳过该张水印」处理：成品将不含可见时间戳，不满足文档"
+                                     " 3.6 与第 10 节评价要求，故判定失败；请改用 EXIF 或文件修改时间策略")
+                else:
+                    if exif_note:
+                        r.warnings.append(exif_note)
+                    r.capture_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    if exif_tag != "DateTimeOriginal":
+                        r.warnings.append("时间戳非 DateTimeOriginal 拍摄日期，非 EXIF 拍摄日期，请人工核对")
             elif cfg.time_source == "file_mtime":
                 dt = datetime.fromtimestamp(src.stat().st_mtime)
                 r.capture_time = dt.strftime("%Y-%m-%d %H:%M:%S")
-                r.warnings.append("按配置使用文件修改时间，非 EXIF 拍摄日期")
+                r.warnings.append("按配置使用文件修改时间，非 EXIF 拍摄日期，不满足文档 3.6")
             else:
                 time_text = cfg.fixed_time_text
                 r.capture_time = "（固定文本）"
+                r.warnings.append("时间来源为固定文本，非 EXIF 拍摄日期，不满足文档 3.6")
 
             if dt is not None:
                 try:
                     time_text = dt.strftime(cfg.time_format)
                     name_time_text = time_text
                 except (ValueError, TypeError) as exc:
-                    return _fail(r, STAGE_TIME, f"时间格式渲染失败：{exc}")
-            if not skip_watermark:
-                r.watermark_text = format_content(cfg.content_template, time_text, src.stem,
-                                                  cfg.start_index + seq - 1)
-                if not r.watermark_text:
-                    return _fail(r, STAGE_TIME, "水印内容为空（请检查内容模板与时间格式）")
+                    return abort(STAGE_TIME, f"时间格式渲染失败：{exc}")
+            r.watermark_text = format_content(cfg.content_template, time_text, src.stem,
+                                              cfg.start_index + seq - 1)
+            if not r.watermark_text:
+                return abort(STAGE_TIME, "水印内容为空（请检查内容模板与时间格式）")
+            if cfg.time_source != "fixed" and time_text and time_text not in r.watermark_text:
+                return abort(STAGE_TIME,
+                             "水印内容模板未包含 {time}，成品不含时间戳；请在模板中加入 {time}")
 
         # --- 阶段 3：尺寸与像素规格调整 ---
         try:
             image = _stage_resize(oriented, cfg)
         except (ValueError, MemoryError, OSError) as exc:
-            return _fail(r, STAGE_RESIZE, f"尺寸调整失败：{exc}")
+            return abort(STAGE_RESIZE, f"尺寸调整失败：{exc}")
         del oriented
 
         # --- 阶段 4：时间水印渲染（文档 3.5 / 3.7 / 3.8） ---
-        if cfg.watermark_enabled and not skip_watermark:
+        if cfg.watermark_enabled:
             try:
                 image, rect, wm_warn = _stage_watermark(image, cfg, r.watermark_text)
                 r.watermark_rect = rect
                 r.warnings.extend(wm_warn)
             except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
-                return _fail(r, STAGE_WATERMARK, f"水印渲染失败：{exc}")
+                return abort(STAGE_WATERMARK, f"水印渲染失败：{exc}")
 
-        # --- 阶段 5：批量导出（文档 3.9 / 3.10） ---
+        # --- 阶段 5/6：先写临时文件 → 校验临时文件 → 原子替换到目标路径 ---
+        # 这样：① 校验失败不会破坏运行前已存在的同名旧成品；
+        #      ② 任何失败都不会在输出目录留下「判失败但已产出」的残留文件。
         fmt, ext = resolve_output_format(cfg, src)
         expected_size = image.size
+        prot = protected_paths
         try:
-            out_path = build_output_path(src, cfg, seq, ext, name_time_text, used_names)
+            out_path = build_output_path(src, cfg, seq, ext, name_time_text, used_names, prot)
+            r.attempted_output = str(out_path)
             if out_path.exists() and cfg.on_exists == "skip":
                 r.status = STATUS_SKIPPED
-                r.reason = "同名输出文件已存在，按配置跳过"
-                r.output_path = str(out_path)
+                r.stage = STAGE_EXPORT
+                r.reason = f"同名输出文件已存在（{out_path.name}），按配置跳过；该路径不是本次产出"
+                r.warnings.append(f"已存在的同名文件：{out_path}")
                 return r
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            r.warnings.extend(_save_image(image, out_path, fmt, cfg, raw_exif))
+            tmp_path = out_path.with_name(f"._pw_{os.getpid()}_{seq}_{int(time.time() * 1000)}.tmp")
+            r.warnings.extend(_save_image(image, tmp_path, fmt, cfg, raw_exif, icc_profile))
         except (OSError, ValueError, TypeError) as exc:
-            return _fail(r, STAGE_EXPORT, f"导出失败：{exc}")
-        r.output_path = str(out_path)
-        r.output_size = f"{expected_size[0]}×{expected_size[1]}"
+            return abort(STAGE_EXPORT, f"导出失败：{exc}")
 
-        # --- 阶段 6：输出校验（失败照片识别与校验） ---
         if cfg.verify_output:
-            ok, why, actual, _ = _verify_output(out_path, expected_size, fmt, cfg)
+            ok, why, _, _ = _verify_output(tmp_path, expected_size, fmt, cfg)
             if not ok:
-                _cleanup(out_path)
-                r.output_path = ""
-                return _fail(r, STAGE_VERIFY, f"输出校验未通过：{why}")
+                return abort(STAGE_VERIFY, f"输出校验未通过：{why}")
             r.verified = True
         else:
-            if not out_path.is_file() or out_path.stat().st_size < 1:
-                return _fail(r, STAGE_VERIFY, "输出文件未生成或为空")
+            if not tmp_path.is_file() or tmp_path.stat().st_size < 1:
+                return abort(STAGE_VERIFY, "输出文件未生成或为空")
             r.warnings.append("按配置未执行输出回读校验")
 
-        downgrade = ("缺失 EXIF", "非 EXIF", "未执行输出回读校验", "未写入 EXIF")
+        try:
+            os.replace(str(tmp_path), str(out_path))
+        except OSError as exc:
+            return abort(STAGE_EXPORT, f"成品落盘失败：{exc}")
+        tmp_path = None
+
+        r.output_path = str(out_path)
+        r.output_size = f"{expected_size[0]}×{expected_size[1]}"
+        downgrade = ("缺失 EXIF", "非 EXIF", "未执行输出回读校验", "未写入 EXIF",
+                     "自动缩小", "回退到", "不足")
         r.status = STATUS_WARNING if any(
             any(k in w for k in downgrade) for w in r.warnings) else STATUS_SUCCESS
         return r
 
     except Exception as exc:  # 兜底：任何未预料异常都必须落到逐张状态里
-        _cleanup(out_path)
-        return _fail(r, r.stage or "未知阶段", f"未预料异常：{type(exc).__name__}: {exc}")
+        return abort(r.stage or "未知阶段", f"未预料异常：{type(exc).__name__}: {exc}")
     finally:
+        _cleanup(tmp_path)
         r.duration_ms = int((time.perf_counter() - started) * 1000)
 
 

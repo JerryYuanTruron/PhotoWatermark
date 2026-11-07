@@ -28,12 +28,14 @@ from .engine import (
 )
 
 STAGE_ADVICE = {
-    "导入": "确认文件未损坏、格式受支持(JPG/PNG/BMP/TIF/WEBP)；必要时从相机重新导出或补拍",
-    "时间源": "确认原图保留了 EXIF 拍摄日期；勿用微信/截图等会剥离 EXIF 的方式传输。"
-              "如确无 EXIF，可在规则中改为「回退到文件修改时间」或「固定文本」",
+    "导入": "确认文件未损坏、格式受支持(JPG/PNG/BMP/TIF/WEBP)；必要时从相机重新导出或补拍。"
+            "BMP/TIF/WEBP 常不含 EXIF，建议先转 JPG 或改时间来源",
+    "时间源": "确认原图保留了 EXIF DateTimeOriginal(拍摄日期)；勿用微信/截图等会剥离 EXIF 的方式传输。"
+              "如确无 EXIF，可改为「回退到文件修改时间」（会标记警告，需人工核对时间）",
     "尺寸调整": "检查目标宽高是否过大、内存是否充足；必要时改用「不缩放」或降低目标尺寸",
-    "水印渲染": "检查字体文件是否存在、字号是否过大、目标画布是否过小",
-    "导出": "检查输出目录权限、磁盘剩余空间、文件名模板是否含非法字符",
+    "水印渲染": "检查字体文件与不透明度(须≥1)、字号是否过大、目标画布是否过小、"
+                "内容模板是否包含 {time}",
+    "导出": "检查输出目录权限/磁盘空间/文件名模板非法字符；若路径过长请缩短文件名模板或输出路径",
     "输出校验": "检查磁盘写入稳定性与编码设置；处理后重试该张",
     "未知阶段": "记录异常信息并反馈开发维护人员",
 }
@@ -89,15 +91,18 @@ def summarize(results: list[ProcessResult], cfg: RuleConfig,
     return s
 
 
-def audit_batch(results: list[ProcessResult]) -> list[str]:
-    """批次级交叉复核：确认失败照片没有污染输出目录、成功照片确有合格成品。"""
+def audit_batch(results: list[ProcessResult], cfg: RuleConfig | None = None) -> list[str]:
+    """批次级交叉复核。
+
+    不再依赖「结果对象自己声明的 output_path」——失败时该字段可能为空，
+    但导出阶段曾尝试写过文件。改为用 attempted_output 反向核对实际磁盘状态。
+    """
     findings: list[str] = []
+    notes: list[str] = []
     for r in results:
-        if not r.output_path:
-            continue
-        p = Path(r.output_path)
         if r.status in (STATUS_SUCCESS, STATUS_WARNING):
-            if not p.is_file():
+            p = Path(r.output_path)
+            if not r.output_path or not p.is_file():
                 findings.append(f"#{r.index} {r.filename}：判定成功但输出文件缺失（{p.name}）")
                 continue
             try:
@@ -105,13 +110,28 @@ def audit_batch(results: list[ProcessResult]) -> list[str]:
                     im.verify()
             except (OSError, ValueError, UnidentifiedImageError) as exc:
                 findings.append(f"#{r.index} {r.filename}：成品回读失败（{exc}）")
-        elif r.status == STATUS_FAILED:
-            # 失败照片的输出路径已由 engine 清空；此处再确认未残留同名文件
+        elif r.status == STATUS_FAILED and r.attempted_output:
+            p = Path(r.attempted_output)
             if p.is_file():
                 findings.append(f"#{r.index} {r.filename}：判定失败但仍存在残留输出（{p.name}）")
+
+    # 批次内成品尺寸一致性：none 模式天然可能不一致，需显式提示
+    sizes = {r.output_size for r in results if r.ok and r.output_size}
+    if len(sizes) > 1:
+        mode = cfg.resize_mode if cfg else "未知"
+        notes.append(f"提示：批次内成品尺寸不一致（{', '.join(sorted(sizes))}；"
+                     f"缩放方式={mode}）。贴入报告前请统一尺寸")
+    # 文档「≥2100 万像素」是拍摄原件评价要求；成品像素数如实记录，避免误导
+    if cfg and cfg.resize_mode != "none":
+        pixels = cfg.target_width * cfg.target_height
+        notes.append(
+            f"提示：本次目标输出 {cfg.target_width}×{cfg.target_height} = {pixels:,} 像素。"
+            "文档第 8/10 节「≥2100 万像素」是拍摄原件的评价要求，本程序不校验该指标；"
+            "原始照片请另行归档，成品用于报告/客户交付")
+
     if not findings:
         findings.append("通过：失败照片均未产生成品，成功照片输出文件均可正常解码")
-    return findings
+    return findings + notes
 
 
 def attention_rows(results: list[ProcessResult]) -> list[ProcessResult]:
@@ -225,7 +245,7 @@ def export_reports(results: list[ProcessResult], cfg: RuleConfig,
         out_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         rows = attention_rows(results)
-        summary.audit = audit_batch(results)
+        summary.audit = audit_batch(results, cfg)
 
         p_csv = out_dir / "失败清单.csv"
         p_txt = out_dir / "失败清单.txt"

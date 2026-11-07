@@ -9,17 +9,14 @@ rules/last_used.json
 logs/
 *.log
 
-# ---- 构建中间产物（dist 内的交付 exe 需入库，故只忽略目录内通配内容）----
+# ---- 构建产物：exe / BUILD_INFO 均为可重建的构建产物，不入库 ----
+# 源码版本管理 + tag 指向构建时的提交；BUILD_INFO.txt 记录该提交号与 exe sha256 以便回溯。
+# 需要二进制时运行 build_exe.bat 重新生成（同一提交可复现）。
 build/
 dist/*
 !dist/.gitkeep
-!dist/PhotoWatermark.exe
-!dist/BUILD_INFO.txt
 
 # ---- 操作系统 ----
 Thumbs.db
 Desktop.ini
 .DS_Store
-
-# ---- 交付给操作人员的 exe 例外：dist/PhotoWatermark.exe 需入库 ----
-!dist/PhotoWatermark.exe

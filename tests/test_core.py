@@ -188,16 +188,18 @@ def main() -> int:
     check("E7 输出目录只含合格成品",
           len(list(base.iterdir())) == 1, str([p.name for p in base.iterdir()]))
 
-    for policy, expect_status, kw in (
-        ("use_file_mtime", engine.STATUS_WARNING, "文件修改时间"),
-        ("no_watermark", engine.STATUS_WARNING, "跳过该张水印"),
-    ):
-        cfg = config.RuleConfig(output_dir=str(fresh("policy_" + policy)),
-                                missing_exif_policy=policy)
-        rr = run([noexif], cfg)[0]
-        check(f"E8 EXIF缺失策略 {policy}",
-              rr.status == expect_status and any(kw in w for w in rr.warnings),
-              f"{rr.status} {rr.warnings}")
+    cfg = config.RuleConfig(output_dir=str(fresh("policy_use_file_mtime")),
+                            missing_exif_policy="use_file_mtime")
+    rr = run([noexif], cfg)[0]
+    check("E8 EXIF缺失策略 use_file_mtime → 警告且说明非拍摄日期",
+          rr.status == engine.STATUS_WARNING and any("非 EXIF 拍摄日期" in w for w in rr.warnings),
+          f"{rr.status} {rr.warnings}")
+    cfg = config.RuleConfig(output_dir=str(fresh("policy_no_watermark")),
+                            missing_exif_policy="no_watermark")
+    rr = run([noexif], cfg)[0]
+    check("E8b EXIF缺失策略 no_watermark → 判失败（成品无时间戳不可交付）",
+          rr.status == engine.STATUS_FAILED and "不含可见时间戳" in rr.reason,
+          f"{rr.status} {rr.reason}")
 
     cfg = config.RuleConfig(output_dir=str(fresh("mtime")), time_source="file_mtime")
     rr = run([noexif], cfg)[0]
@@ -225,7 +227,7 @@ def main() -> int:
     print("\n[F] 输出命名与同名策略")
     cfg = config.RuleConfig(output_dir=str(fresh("names")), filename_template="{name}")
     rr = run([good], cfg)[0]
-    check("F1 {name} 保持原名（满足第10节命名规范）",
+    check("F1 {name} 保持原名（不追加 _结果 后缀）",
           Path(rr.output_path).stem == "PeCu_2718281828_0001", Path(rr.output_path).name)
     cfg = config.RuleConfig(output_dir=str(fresh("seqname")), filename_template="{seq}_{name}")
     check("F2 序号模板生效", Path(run([good], cfg)[0].output_path).name.startswith("0001_"))
@@ -289,7 +291,7 @@ def main() -> int:
     rr = run([good], cfg)[0]
     check("H1 全透明水印被渲染自检拦截并判失败",
           rr.status == engine.STATUS_FAILED and rr.stage == engine.STAGE_WATERMARK
-          and "水印图层为空" in rr.reason,
+          and ("水印图层为空" in rr.reason or "字体不透明度" in rr.reason),
           f"{rr.status} {rr.reason}")
     cfg = config.RuleConfig(output_dir=str(fresh("tiny_canvas")), target_width=32,
                             target_height=24, font_size=500)
@@ -312,6 +314,97 @@ def main() -> int:
           str(rr.output_path))
     check("H5 原始样本文件未被改写",
           Image.open(good).size == (1200, 900) and Image.open(src_copy).size == (1200, 900))
+
+    # ------------------------------------------------------------------
+    print("\n[I] 对抗式审查回归（独立审查复现的高危场景）")
+    cfg = config.RuleConfig(output_dir=str(fresh("invisible")), font_opacity=0,
+                            shadow_opacity=70)
+    rr = run([good], cfg)[0]
+    check("I1 文字全透明+有阴影 不再判成功",
+          rr.status == engine.STATUS_FAILED, f"{rr.status} {rr.reason}")
+    check("I1b 配置校验拦截 font_opacity=0",
+          any("字体不透明度" in e for e in cfg.validate()), str(cfg.validate()))
+    cfg = config.RuleConfig(output_dir=str(fresh("no_token")), content_template="PHOTO OK")
+    rr = run([good], cfg)[0]
+    check("I2 水印模板不含 {time} 被拦截",
+          rr.status == engine.STATUS_FAILED and "不含时间戳" in rr.reason,
+          f"{rr.status} {rr.reason}")
+    check("I2b 配置校验拦截缺失 {time}",
+          any("{time}" in e for e in cfg.validate()), str(cfg.validate()))
+    dt3, tag3, note3 = engine.read_exif_datetime_ex(
+        Image.open(by_name["PeCu_2718281828_0002.jpg"]).getexif())
+    check("I3 回退到 DateTime 时显式报告偏差",
+          tag3 == "DateTime" and "非拍摄日期" in note3, f"{tag3} / {note3}")
+    cfg = config.RuleConfig(output_dir=str(fresh("fallback_note")))
+    rr = run([by_name["PeCu_2718281828_0002.jpg"]], cfg)[0]
+    check("I3b 回退时间戳成品降级为警告",
+          rr.status == engine.STATUS_WARNING and any("非 EXIF 拍摄日期" in w for w in rr.warnings),
+          f"{rr.status} {rr.warnings}")
+    cfg = config.RuleConfig(output_dir=str(fresh("fixed_note")), time_source="fixed",
+                            fixed_time_text="2026/11/07 12:00:00")
+    rr = run([good], cfg)[0]
+    check("I3c 固定文本也降级为警告",
+          rr.status == engine.STATUS_WARNING and any("非 EXIF 拍摄日期" in w for w in rr.warnings),
+          f"{rr.status} {rr.warnings}")
+
+    # H2：输出目录 = 源目录，且输出名与「另一张待处理源」同名
+    coll = fresh("collision")
+    a = coll / "A.jpg"
+    b = coll / "A_结果.jpg"
+    shutil.copy2(good, a)
+    shutil.copy2(by_name["PeCu_2718281828_0002.jpg"], b)
+    b_before = b.read_bytes()
+    cfg = config.RuleConfig(output_dir=str(coll))
+    protected = {str(x.resolve()).lower() for x in (a, b)}
+    used: set[str] = set()
+    r1 = engine.process_one(a, cfg, 1, used, protected)
+    r2 = engine.process_one(b, cfg, 2, used, protected)
+    check("I4 批次内源照片不被前一张成品覆盖",
+          b.read_bytes() == b_before and r1.ok and r2.ok
+          and Path(r1.output_path).resolve() != b.resolve(),
+          f"r1={r1.status}:{r1.output_path} r2={r2.status} b_changed={b.read_bytes() != b_before}")
+
+    # H5：导出阶段中途异常不得残留半成品，且批次审计必须发现
+    leak = fresh("export_leak")
+    cfg = config.RuleConfig(output_dir=str(leak))
+    original_save = engine._save_image
+
+    def broken_save(img, path, fmt, c, raw_exif, icc=None):
+        Path(path).write_bytes(b"partial")
+        raise OSError("模拟写入中断")
+
+    with mock.patch.object(engine, "_save_image", broken_save):
+        bad = run([good], cfg)[0]
+    engine._save_image = original_save
+    check("I5 导出异常 → 失败且输出目录无残留",
+          bad.status == engine.STATUS_FAILED and bad.stage == engine.STAGE_EXPORT
+          and not list(leak.iterdir()),
+          f"{bad.status} {[p.name for p in leak.iterdir()]}")
+    check("I5b 失败结果记录 attempted_output 供审计",
+          bool(bad.attempted_output), bad.attempted_output)
+
+    # M5：校验失败不得销毁运行前已存在的同名旧成品
+    keep = fresh("keep_old")
+    old = keep / "PeCu_2718281828_0001_结果.jpg"
+    old.write_bytes(b"PREEXISTING")
+    cfg = config.RuleConfig(output_dir=str(keep), min_output_bytes=10_000_000)
+    rr = run([good], cfg)[0]
+    check("I6 校验失败不破坏运行前旧成品",
+          rr.status == engine.STATUS_FAILED and old.read_bytes() == b"PREEXISTING",
+          f"{rr.status} old={old.read_bytes()[:20]}")
+
+    # 批次尺寸一致性提示
+    cfg = config.RuleConfig(output_dir=str(fresh("size_note")), resize_mode="none")
+    rs = run([good, portrait], cfg)
+    s = reporter.summarize(rs, cfg, datetime.now(), datetime.now())
+    findings = reporter.audit_batch(rs, cfg)
+    check("I7 不缩放导致尺寸不一致时审计给出提示",
+          any("尺寸不一致" in f for f in findings), str(findings))
+    cfg_scaled = config.RuleConfig(output_dir=str(fresh("pixel_note")))
+    rs2 = run([good, portrait], cfg_scaled)
+    findings2 = reporter.audit_batch(rs2, cfg_scaled)
+    check("I8 处理报告显式说明 2100 万像素边界",
+          any("2100 万像素" in f for f in findings2), str(findings2))
 
     # ------------------------------------------------------------------
     print("\n" + "=" * 68)

@@ -103,12 +103,15 @@ FIELD_GROUPS: list[tuple[str, list[Field], str]] = [
         ("on_exists", "同名文件时", "mapped", ON_EXISTS, ""),
         ("start_index", "起始序号", "int", None, ""),
         ("keep_metadata", "保留 EXIF 元数据", "bool", None, ""),
-    ], "文档 3.9：输出目录 + 批量改名 {name}_结果；如需满足第 10 节 <ECU>_<serial>_<seq> 命名规范，可改模板为 {name}。"),
+    ], "文档 3.9：输出目录 + 批量改名 {name}_结果。第 10/11 节 <ECU>_<serial>_<seq> 命名需由源文件名保证；"
+       "改模板为 {name} 只是不追加 _结果 后缀，不会自动规范命名。"),
 
     ("⑤ 失败识别与输出校验", [
         ("verify_output", "输出后回读校验", "bool", None, ""),
         ("min_output_bytes", "成品最小字节数", "int", None, ""),
-    ], "校验可解码、目标尺寸、DPI、文件大小、格式；失败照片自动清理残留成品并列入失败清单。"),
+        ("max_source_pixels", "源图像素安全上限", "int", None, ""),
+    ], "校验可解码、目标尺寸、DPI、文件大小、格式；不校验水印可见性、时间戳正确性、像素数与命名规范。"
+       "失败照片自动清理临时/残留成品并列入失败清单。"),
 ]
 
 TREE_COLUMNS = [
@@ -148,6 +151,7 @@ class App(tk.Tk):
 
         self.vars: dict[str, tk.Variable] = {}
         self.widgets: dict[str, tk.Widget] = {}
+        self.invalid_fields: list[str] = []
         self.files: list[str] = []
         self.results: list[ProcessResult] = []
         self.summary: BatchSummary | None = None
@@ -218,7 +222,7 @@ class App(tk.Tk):
         ttk.Button(row1, text="应用预置", command=self._apply_preset).pack(side="left", padx=2)
         ttk.Button(row1, text="保存规则…", command=self._save_rules).pack(side="left", padx=2)
         ttk.Button(row1, text="载入规则…", command=self._load_rules).pack(side="left", padx=2)
-        ttk.Button(row1, text="恢复文档预置", command=self._restore_default).pack(side="left", padx=2)
+        ttk.Button(row1, text="重置为文档预置(全部)", command=self._restore_default).pack(side="left", padx=2)
 
         row2 = ttk.Frame(bar)
         row2.pack(fill="x", pady=2)
@@ -231,6 +235,13 @@ class App(tk.Tk):
         self.import_label.pack(side="left", padx=14)
         ttk.Label(row2, text="支持 JPG / PNG / BMP / TIF / WEBP；重复文件自动去重",
                   foreground="#5F6B7A").pack(side="right")
+
+        note = ttk.Label(
+            bar,
+            text="注意：默认 2400×1800 为「报告 / 客户交付」尺寸；文档「≥2100 万像素」是拍摄原件的评价要求，"
+                 "原始照片请另行归档。需输出原始分辨率时请切换「高像素归档 · 保持原尺寸」预置。",
+            foreground="#9A5B00", wraplength=1180, justify="left")
+        note.pack(fill="x", pady=(4, 0))
 
     def _build_notebook(self) -> None:
         nb = ttk.Notebook(self)
@@ -398,6 +409,7 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     def _collect_config(self) -> RuleConfig:
         cfg = RuleConfig()
+        self.invalid_fields: list[str] = []
         for key, var in self.vars.items():
             value = var.get()
             if isinstance(self.widgets.get(key), MappedCombo):
@@ -408,7 +420,9 @@ class App(tk.Tk):
                 try:
                     setattr(cfg, key, int(str(value).strip()))
                 except ValueError:
-                    setattr(cfg, key, 0)
+                    # 不静默置 0（0 可能是合法值，会绕过配置校验）：保留默认值并显式报错
+                    self.invalid_fields.append(key)
+                    setattr(cfg, key, getattr(RuleConfig(), key))
             else:
                 setattr(cfg, key, str(value))
         for key, widget in self.widgets.items():
@@ -568,7 +582,9 @@ class App(tk.Tk):
         if self.busy:
             return
         cfg = self._collect_config()
-        errors = cfg.validate()
+        errors = list(cfg.validate())
+        if self.invalid_fields:
+            errors.insert(0, "以下数值字段填写非法，请改为数字：" + "、".join(self.invalid_fields))
         if errors:
             self.nb.select(self.tab_config)
             messagebox.showerror("规则配置有误，无法开始", "\n".join(f"• {e}" for e in errors))
@@ -579,8 +595,8 @@ class App(tk.Tk):
         if Path(cfg.output_dir).resolve() in {Path(p).parent.resolve() for p in self.files}:
             if not messagebox.askyesno(
                     "输出目录与源照片目录相同",
-                    "输出目录与部分源照片位于同一文件夹。程序会自动避免覆盖原图，\n"
-                    "但建议另选输出目录以便区分原件与成品。是否仍继续？"):
+                    "输出目录与部分源照片位于同一文件夹。程序会避免覆盖本批次任何源照片，\n"
+                    "但强烈建议另选独立输出目录以便区分原件与成品。是否仍继续？"):
                 return
 
         save_last_used(cfg)
@@ -600,12 +616,19 @@ class App(tk.Tk):
     def _run_batch(self, cfg: RuleConfig, files: list[str]) -> None:
         started = datetime.now()
         used: set[str] = set()
+        # 整批源照片集合：任何输出都不得覆盖其中任何一个（含尚未处理的照片）
+        protected: set[str] = set()
+        for f in files:
+            try:
+                protected.add(str(Path(f).resolve()).lower())
+            except OSError:
+                pass
         results: list[ProcessResult] = []
         try:
             for i, path in enumerate(files, 1):
                 if self.stop_event.is_set():
                     break
-                r = process_one(path, cfg, i, used)
+                r = process_one(path, cfg, i, used, protected)
                 results.append(r)
                 self.msg_queue.put(("item", i, r))
                 self.msg_queue.put(("progress", i, len(files)))
@@ -696,18 +719,25 @@ class App(tk.Tk):
     def _show_done_message(self, s: BatchSummary, paths: dict[str, str], cfg: RuleConfig) -> None:
         failed = s.failed + s.skipped
         self._set_status(f"处理完成：{s.headline()}；报告已输出到 {cfg.output_dir}")
+        if cfg.verify_output:
+            check_text = (f"已对 {s.verified} 张成品完成输出回读校验"
+                          "（可解码 / 目标尺寸 / DPI / 格式 / 文件大小）。")
+        else:
+            check_text = "按配置【未执行】输出回读校验，请人工抽检成品。"
+        scope_text = ("校验范围不含：水印可见性、时间戳正确性、≥2100 万像素、命名规范；"
+                      "发客户或贴报告前请按处理报告中的提示复核。")
         if "error" in paths:
             messagebox.showwarning("处理完成，但报告写出失败", paths["error"])
         elif failed:
             messagebox.showwarning(
                 "批量处理完成（存在失败照片）",
                 f"{s.headline()}\n\n失败/跳过 {failed} 张，详见输出目录中的「失败清单.csv / .txt」。\n"
-                f"失败照片均已自动排除，输出目录内只保留合格成品。\n\n输出目录：{cfg.output_dir}")
+                f"失败照片不会产出成品。{check_text}\n{scope_text}\n\n输出目录：{cfg.output_dir}")
         else:
             messagebox.showinfo(
                 "批量处理完成",
-                f"{s.headline()}\n\n全部照片已按统一规则输出并逐一通过校验。\n"
-                f"输出目录：{cfg.output_dir}")
+                f"{s.headline()}\n\n本批照片已按统一规则批量导出。{check_text}\n"
+                f"{scope_text}\n\n输出目录：{cfg.output_dir}")
 
     # ------------------------------------------------------------------
     # 结果交互与报告
