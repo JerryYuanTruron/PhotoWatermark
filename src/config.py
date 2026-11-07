@@ -105,6 +105,20 @@ WATERMARK_FIXED: dict[str, Any] = {
 # 这些字段不允许出现在界面、也不允许被规则文件改写
 FIXED_WATERMARK_FIELDS: tuple[str, ...] = tuple(WATERMARK_FIXED)
 
+# --------------------------------------------------------------------------
+# 合规口径：与时间水印同级，操作人员不可修改（界面只读展示）
+#
+# 这三项直接决定成品能否交付：像素数下限、4:3 横版（crop43）、客户命名规范。
+# 允许现场修改等于允许绕过客户硬指标，因此收归系统固定：
+# 界面只读、规则文件无法改写；确需变更须改常量并发版。
+# --------------------------------------------------------------------------
+COMPLIANCE_FIXED: dict[str, Any] = {
+    "resize_mode": "crop43",
+    "min_output_megapixels": 21,
+    "filename_template": "{ecu}_{serial}_{seq}",
+}
+COMPLIANCE_LOCKED_FIELDS: tuple[str, ...] = tuple(COMPLIANCE_FIXED)
+
 # V1 p.3 / V2 §11 命名规范：<ECU name>_<serial number>_<sequential number>
 # {seq} 为 4 位序号（V1 示例 0001）；{ecu}/{serial} 由操作人员在界面填写，程序不预填，
 # 避免把 OCR 误差或猜测值写进客户交付文件名。
@@ -206,6 +220,17 @@ class RuleConfig:
         因此不存在任何可改写水印内容、格式或外观的路径。
         """
         for key, value in WATERMARK_FIXED.items():
+            setattr(self, key, value)
+        return self
+
+    def apply_compliance_lock(self) -> "RuleConfig":
+        """把合规口径三项强制为系统固定值，返回自身（幂等）。
+
+        调用点：界面收集（_collect_config）与规则文件载入。
+        **引擎不强制**：自动化测试与内部批处理仍可按需传入较小门槛，
+        但操作人员的任何界面/规则文件路径都无法改写这三项。
+        """
+        for key, value in COMPLIANCE_FIXED.items():
             setattr(self, key, value)
         return self
 

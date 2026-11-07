@@ -98,6 +98,20 @@ def main() -> int:
     ] + [f"  {name} = {digest}" for name, digest in sorted(source_hashes.items())]) + "\n"
     (dist / "BUILD_INFO.txt").write_text(info, encoding="utf-8")
     print(info)
+
+    # 交付目录纯净：rules/ 是程序运行时写在 exe 同级的启动配置缓存，
+    # 一旦被上一次运行写回（ECU 名称、序列号、输出目录），整目录分发就会预填他人数据。
+    stale_rules = dist / "rules"
+    if stale_rules.is_dir():
+        for f in stale_rules.iterdir():
+            if f.is_file():
+                f.unlink()
+        stale_rules.rmdir()
+        print("[CLEAN] 已移除 dist/rules（启动配置缓存不随包分发）")
+    leftover = dist / "输出照片"
+    if leftover.is_dir() and any(leftover.iterdir()):
+        print(f"[WARN] dist/输出照片 仍有 {len(list(leftover.iterdir()))} 项，分发前请清理")
+
     print(f"[OK] 产物：{EXE}  ({len(data) / 1024 / 1024:.1f} MB)")
     return 0
 

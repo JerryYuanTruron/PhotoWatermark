@@ -108,6 +108,20 @@ def _selftest(workdir: str) -> int:
         ck("watermark_content_locked",
            config.RuleConfig(output_dir=str(out), content_template="{filename} | {time}")
            .apply_fixed_watermark().content_template == "{time}", "")
+        # v1.5.0：合规口径（像素下限 / 缩放方式 / 命名模板）收归系统固定，界面只读
+        rogue = config.RuleConfig(output_dir=str(out), min_output_megapixels=0,
+                                  resize_mode="contain", filename_template="{name}_结果")
+        locked_cfg = rogue.apply_compliance_lock()
+        ck("compliance_locked",
+           locked_cfg.min_output_megapixels == 21
+           and locked_cfg.resize_mode == "crop43"
+           and locked_cfg.filename_template == "{ecu}_{serial}_{seq}",
+           f"{locked_cfg.min_output_megapixels}/{locked_cfg.resize_mode}/"
+           f"{locked_cfg.filename_template}")
+        ck("compliance_fields_declared",
+           set(config.COMPLIANCE_LOCKED_FIELDS) ==
+           {"resize_mode", "min_output_megapixels", "filename_template"},
+           config.COMPLIANCE_LOCKED_FIELDS)
         ck("exif_diagnostics", hasattr(engine, "read_exif_datetime_ex"), "")
         # v1.1.0 客户合规门槛
         ck("guard_pixel_spec",

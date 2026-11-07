@@ -19,6 +19,7 @@ from PIL import Image  # noqa: F401  (确保打包时 PIL 被收集)
 
 from . import __app_name__, __spec_source__, __version__
 from .config import (
+    COMPLIANCE_FIXED,
     FILENAME_TEMPLATE_PRESETS,
     ON_EXISTS,
     OUTPUT_FORMATS,
@@ -63,20 +64,24 @@ PANEL_FIELDS: tuple[str, ...] = REQUIRED_FIELDS + ("start_index",)
 
 # 高级设置页签（只含非水印项；时间水印由系统固定生成，不在此出现、也不可修改）
 ADVANCED_GROUPS: list[tuple[str, list[Field], str]] = [
+    ("合规口径（系统固定 · 只读）", [
+        ("resize_mode", "缩放方式", "locked", None, ""),
+        ("min_output_megapixels", "主输出像素下限", "locked", None, ""),
+        ("filename_template", "批量文件名模板", "locked", None, ""),
+    ], "客户规范 V1 p.3 / V2 §8·§10·§11：成品须 ≥2100 万像素、4:3 横版、按 <ECU 名称>_<序列号>_<四位序号> 命名。"
+       "这三项由系统固定、界面不可修改；如需变更须改代码并发布新版本。"),
+
     ("输出规格", [
-        ("resize_mode", "缩放方式", "mapped", RESIZE_MODES, ""),
         ("target_width", "目标宽度 (px)", "int", None, ""),
         ("target_height", "目标高度 (px)", "int", None, ""),
         ("dpi", "像素规格 DPI", "int", None, ""),
         ("output_format", "输出格式", "mapped", OUTPUT_FORMATS, ""),
         ("jpeg_quality", "JPEG 质量", "int", None, ""),
-        ("min_output_megapixels", "主输出像素下限 (MP)", "int", None, ""),
         ("background", "留白背景色", "color", None, ""),
-    ], "客户规范 V1 p.3 / V2 §8·§10：成品必须 ≥2100 万像素且为 4:3 横版。"
-       "默认「居中裁边到 4:3」：只裁左右（约各 3.3%）、不缩放、不重采样，通常无需修改。"),
+    ], "缩放方式固定为「居中裁边到 4:3」：只裁左右（约各 3.3%）、不缩放、不重采样。"
+       "目标宽高仅在报告插图副本等场景生效。"),
 
     ("输出与命名", [
-        ("filename_template", "批量文件名模板", "editable", [t for t, _ in FILENAME_TEMPLATE_PRESETS], ""),
         ("on_exists", "同名文件时", "mapped", ON_EXISTS, ""),
         ("keep_metadata", "保留 EXIF 元数据", "bool", None, ""),
         ("report_copy_enabled", "另出报告插图副本", "bool", None, ""),
@@ -435,6 +440,20 @@ class App(tk.Tk):
             w = ttk.Checkbutton(cell, variable=var)
             w.pack(side="left")
             self.vars[key] = var
+        elif kind == "locked":
+            # 只读展示：不给输入控件、不写入 self.vars，因此界面/规则文件都改不了
+            raw = COMPLIANCE_FIXED.get(key, "")
+            if key == "resize_mode":
+                text = RESIZE_MODES.get(str(raw), str(raw))
+            elif key == "min_output_megapixels":
+                text = f"{float(raw):g} MP（≥2100 万像素）"
+            else:
+                text = str(raw)
+            w = ttk.Label(cell, text=text, foreground="#134E7C",
+                          font=("Microsoft YaHei UI", 9, "bold"))
+            w.pack(side="left", fill="x", expand=True)
+            self.widgets[key] = w
+            return
         elif kind == "mapped":
             w = MappedCombo(cell, options, width=21)
             w.pack(side="left", fill="x", expand=True)
@@ -550,7 +569,8 @@ class App(tk.Tk):
                 setattr(cfg, key, widget.value())
         # 时间水印由系统统一生成：界面不提供任何水印项，此处再固化一次，
         # 确保即使界面字段被误改也无法改变水印内容/格式/外观。
-        return cfg.apply_fixed_watermark()
+        # 合规口径（≥21MP / crop43 / 合规命名）同样固定，规则文件无法改写。
+        return cfg.apply_fixed_watermark().apply_compliance_lock()
 
     def _apply_config(self, cfg: RuleConfig) -> None:
         for key, var in self.vars.items():
