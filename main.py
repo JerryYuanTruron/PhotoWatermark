@@ -116,8 +116,24 @@ def _selftest(workdir: str) -> int:
         ck("strict_exif_policy",
            strict.time_source == "exif" and strict.missing_exif_policy == "fail"
            and strict.resize_mode == "none", "")
-        ck("precheck_available", hasattr(engine, "precheck_exif")
-           and hasattr(engine, "diagnose_app1_capture_time"), "")
+        ck("exif_only_trigger", hasattr(engine, "has_exif_capture_time")
+           and engine.has_exif_capture_time(p1)
+           and not engine.has_exif_capture_time(p2), "")
+        # 提示文案：简洁、只要求提供保留完整 EXIF 的原始照片、无任何来源类信息
+        banned = ("微信", "截图", "传输", "APP1", "剥离", "来源", "推断", "诊断")
+        notice = engine.EXIF_NOTICE_MESSAGE
+        ck("notice_clean",
+           bool(notice) and "EXIF" in notice and "原始照片" in notice
+           and not any(w in notice for w in banned)
+           and not any(w in engine.EXIF_NOTICE_TITLE for w in banned)
+           and not any(w in engine.EXIF_MISSING_REASON for w in banned),
+           notice)
+        ck("no_source_diagnostics",
+           not hasattr(engine, "diagnose_app1_capture_time"), "")
+        ck("precheck_uses_uniform_text",
+           engine.precheck_exif(p1) == ""
+           and engine.precheck_exif(p2) == engine.EXIF_MISSING_REASON,
+           engine.precheck_exif(p2))
 
         used: set[str] = set()
         started = datetime.now()

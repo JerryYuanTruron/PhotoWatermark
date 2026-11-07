@@ -61,7 +61,7 @@ ON_EXISTS = {
     "rename": "自动加序号另存",
 }
 
-# 文档 3.7「年/月/日 时:分:秒」对应截图中 [EXIF:Date Taken [Y/m/d H:M:S]]
+# 文档 3.7「年/月/日 时:分:秒」对应文档界面示例 [EXIF:Date Taken [Y/m/d H:M:S]]
 TIME_FORMAT_PRESETS: list[tuple[str, str]] = [
     ("%Y/%m/%d %H:%M:%S", "年/月/日 时:分:秒（文档 3.7，默认）"),
     ("%Y-%m-%d %H:%M:%S", "年-月-日 时:分:秒"),
@@ -75,7 +75,7 @@ TIME_FORMAT_PRESETS: list[tuple[str, str]] = [
 # 避免把 OCR 误差或猜测值写进客户交付文件名。
 FILENAME_TEMPLATE_PRESETS: list[tuple[str, str]] = [
     ("{ecu}_{serial}_{seq}", "{ecu}_{serial}_{seq}（客户合规命名，默认）"),
-    ("{name}_结果", "{name}_结果（V2 步骤 3.9 截图，仅归档用）"),
+    ("{name}_结果", "{name}_结果（V2 步骤 3.9 界面示例，仅归档用）"),
     ("{name}", "{name}（保持原名，不追加后缀）"),
     ("{seq}_{name}", "{seq}_{name}（序号 + 原名）"),
 ]
@@ -153,8 +153,8 @@ class RuleConfig:
     verify_output: bool = True
     min_output_bytes: int = 256
     max_source_pixels: int = 300_000_000      # 解压炸弹保护
-    precheck_exif: bool = True                # 导入时预检 EXIF，提前标出需补原图的照片
-    diagnose_app1_time: bool = True           # 仅在失败原因中提示 APP1 残留时间（不用于水印）
+    # 缺少 EXIF 的提示窗口为无条件行为：触发判断只读取照片 EXIF，
+    # 不受任何配置项、文件名、文件时间或其它数据来源影响。
 
     # ------------------------------------------------------------------
     # 序列化

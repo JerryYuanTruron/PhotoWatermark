@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import os
 import re
-import struct
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -59,7 +58,13 @@ POS_ANCHORS = {
 ILLEGAL_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]')
 MAX_FILENAME_CHARS = 120          # 单文件名上限，避免 Windows 260 字符路径限制
 MIN_VISIBLE_WM_PIXELS = 20        # 水印区域至少要有这么多个像素被明显改变
-APP1_TIME_PATTERN = re.compile(rb"(20\d{2}:\d{2}:\d{2} \d{2}:\d{2}:\d{2})")
+
+# 缺少 EXIF 时面向操作人员的统一提示。
+# 约束：只说明「缺 EXIF」与「提供保留完整 EXIF 的原始照片」，
+# 不附加诊断、建议、数量、技术细节或任何额外字样，避免歧义。
+EXIF_NOTICE_TITLE = "照片缺少 EXIF 信息"
+EXIF_NOTICE_MESSAGE = "缺少 EXIF 信息。请提供保留完整 EXIF 的原始照片。"
+EXIF_MISSING_REASON = "缺少 EXIF 信息，无法生成时间水印。请提供保留完整 EXIF 的原始照片。"
 
 
 @dataclass
@@ -180,52 +185,27 @@ def _parse_exif_dt(raw: Any) -> datetime | None:
         return None
 
 
-def diagnose_app1_capture_time(path: Path) -> str:
-    """只读诊断：从 JPEG APP1/Exif 段提取「孤儿」相机时间字符串。
+def has_exif_capture_time(path: str | Path) -> bool:
+    """触发判断的唯一依据：照片的 EXIF 中是否存在可用的拍摄日期信息。
 
-    微信等传输工具会改写主 IFD 并剥离 306/36867/36868，但原始时间字符串
-    常仍留在 APP1 数据区。本函数**仅用于失败原因提示**，返回值绝不作为水印时间源
-    （客户口径：先补 EXIF 原图再处理，不接受从残留数据推断的时间）。
+    只读 EXIF 的 DateTimeOriginal / DateTimeDigitized / DateTime 三个字段，
+    不读取文件名、文件时间或 JPEG 其它数据段。
     """
     try:
-        with path.open("rb") as f:
-            data = f.read(262144)
-        i = 2
-        while i < len(data) - 4:
-            if data[i] != 0xFF:
-                i += 1
-                continue
-            marker = data[i + 1]
-            if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
-                i += 2
-                continue
-            if marker == 0xDA:
-                break
-            length = struct.unpack(">H", data[i + 2:i + 4])[0]
-            if marker == 0xE1 and data[i + 4:i + 10] == b"Exif\x00\x00":
-                seg = data[i + 10:i + 2 + length]
-                vals = sorted({x.decode("ascii", "ignore")
-                               for x in APP1_TIME_PATTERN.findall(seg)})
-                return vals[0] if vals else ""
-            i += 2 + length
-    except (OSError, struct.error):
-        pass
-    return ""
+        with Image.open(path) as im:
+            dt, _tag, _note = read_exif_datetime_ex(im.getexif())
+        return dt is not None
+    except (OSError, ValueError, UnidentifiedImageError):
+        return False
 
 
 def precheck_exif(path: str | Path) -> str:
-    """导入阶段轻量预检：只读 EXIF，不解码整幅大图。返回问题描述，空串表示通过。"""
-    p = Path(path)
-    try:
-        with Image.open(p) as im:
-            dt, _tag, note = read_exif_datetime_ex(im.getexif())
-        if dt is None:
-            return "缺少 EXIF 拍摄日期（需重新导出保留 EXIF 的原图）"
-        if note:
-            return note
-    except (OSError, ValueError, UnidentifiedImageError) as exc:
-        return f"文件读取失败：{exc}"
-    return ""
+    """导入阶段轻量预检：仅依据 EXIF 判断，不解码整幅大图。
+
+    含 EXIF 拍摄日期即返回空串（即使命中字段不是 DateTimeOriginal，也按原流程处理）；
+    仅当 EXIF 中读不到任何拍摄日期时返回统一提示文案。
+    """
+    return "" if has_exif_capture_time(path) else EXIF_MISSING_REASON
 
 
 def format_content(template: str, time_text: str, stem: str, seq: int,
@@ -566,16 +546,7 @@ def process_one(source: str | Path, cfg: RuleConfig, seq: int,
                 dt, tag = exif_dt, exif_tag
                 if dt is None:
                     if cfg.missing_exif_policy == "fail":
-                        hint = ""
-                        if cfg.diagnose_app1_time:
-                            recovered = diagnose_app1_capture_time(src)
-                            if recovered:
-                                hint = (f"；诊断：文件 APP1 残留相机时间 {recovered}，"
-                                        "说明原图曾含时间信息、经传输工具剥离 EXIF。"
-                                        "按客户口径不使用该恢复值，请重新导出保留 EXIF 的原图")
-                        return abort(STAGE_TIME,
-                                     "缺少 EXIF 拍摄日期（DateTimeOriginal / DateTimeDigitized / DateTime 均未找到），"
-                                     "无法按文档 3.6 生成时间水印" + hint)
+                        return abort(STAGE_TIME, EXIF_MISSING_REASON)
                     if cfg.missing_exif_policy == "use_file_mtime":
                         dt = datetime.fromtimestamp(src.stat().st_mtime)
                         r.warnings.append("缺失 EXIF 拍摄日期，按策略回退到文件修改时间，非 EXIF 拍摄日期")

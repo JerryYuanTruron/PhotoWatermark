@@ -39,12 +39,15 @@ from .config import (
     save_last_used,
 )
 from .engine import (
+    EXIF_MISSING_REASON,
+    EXIF_NOTICE_MESSAGE,
+    EXIF_NOTICE_TITLE,
     STATUS_FAILED,
     STATUS_SKIPPED,
     STATUS_SUCCESS,
     STATUS_WARNING,
     ProcessResult,
-    precheck_exif,
+    has_exif_capture_time,
     process_one,
 )
 from .reporter import BatchSummary, export_reports, summarize
@@ -81,8 +84,8 @@ FIELD_GROUPS: list[tuple[str, list[Field], str]] = [
         ("time_format", "时间格式", "editable", [f for f, _ in TIME_FORMAT_PRESETS], ""),
         ("content_template", "水印内容模板", "editable", ["{time}", "{filename}  {time}", "{seq}  {time}"], ""),
         ("missing_exif_policy", "拍摄日期缺失时", "mapped", EXIF_POLICIES, ""),
-    ], "客户口径：严格使用 EXIF 拍摄日期，缺失即判失败并要求补原图；不使用文件修改时间、"
-       "固定文本或 APP1 残留推断值。文档 3.7 格式 年/月/日 时:分:秒。"),
+    ], "严格使用 EXIF 拍摄日期，缺失时弹出提示窗口并要求提供保留完整 EXIF 的原始照片。"
+       "文档 3.7 格式 年/月/日 时:分:秒。"),
 
     ("③ 时间水印 · 位置 / 字体 / 阴影", [
         ("position", "水印位置", "mapped", POSITIONS, ""),
@@ -113,17 +116,15 @@ FIELD_GROUPS: list[tuple[str, list[Field], str]] = [
         ("keep_metadata", "保留 EXIF 元数据", "bool", None, ""),
     ], "客户规范 V1 p.3 / V2 §11：<ECU 名称>_<序列号>_<四位序号>，例 PeCu_2718281828_0001。"
        "ECU 名称与序列号由操作人员填写一次、整批生效，程序不预填（避免 OCR 误差进入客户文件名）。"
-       "V2 步骤 3.9 截图的 {name}_结果 仅作归档口径，不满足客户命名规范。"),
+       "V2 步骤 3.9 界面示例的 {name}_结果 仅作归档口径，不满足客户命名规范。"),
 
     ("⑤ 失败识别与输出校验", [
         ("verify_output", "输出后回读校验", "bool", None, ""),
         ("min_output_bytes", "成品最小字节数", "int", None, ""),
         ("max_source_pixels", "源图像素安全上限", "int", None, ""),
-        ("precheck_exif", "导入时预检 EXIF", "bool", None, ""),
-        ("diagnose_app1_time", "缺 EXIF 时给诊断提示", "bool", None, ""),
     ], "校验可解码、目标尺寸、DPI、文件大小、格式、主输出像素数 ≥2100 万；"
        "不校验水印可见性、时间戳正确性、命名规范与拍摄顺序。"
-       "预检会在导入后提前标出「需补保留 EXIF 原图」的照片，避免处理完才发现整批失败。"),
+       "EXIF 检查为固定行为，仅依据照片 EXIF，不含 EXIF 时弹窗提示并列入失败清单。"),
 ]
 
 TREE_COLUMNS = [
@@ -165,6 +166,7 @@ class App(tk.Tk):
         self.widgets: dict[str, tk.Widget] = {}
         self.invalid_fields: list[str] = []
         self.precheck: dict[str, str] = {}
+        self.exif_notified: set[str] = set()   # 已弹窗提示过的缺 EXIF 照片，避免重复弹窗
         self.files: list[str] = []
         self.results: list[ProcessResult] = []
         self.summary: BatchSummary | None = None
@@ -252,7 +254,7 @@ class App(tk.Tk):
         note = ttk.Label(
             bar,
             text="客户合规口径：默认「不缩放」保持原分辨率并强制校验成品 ≥2100 万像素；"
-                 "时间水印只认 EXIF 拍摄日期（缺失即失败，须补原图）；文件名按 <ECU>_<序列号>_<四位序号> 生成，"
+                 "缺少 EXIF 信息时弹出提示窗口；文件名按 <ECU>_<序列号>_<四位序号> 生成，"
                  "请先在「输出与合规命名」填写 ECU 名称与序列号。报告插图副本为可选，不满足像素要求。",
             foreground="#9A5B00", wraplength=1180, justify="left")
         note.pack(fill="x", pady=(4, 0))
@@ -562,25 +564,36 @@ class App(tk.Tk):
         self._refresh_import_count()
         self._run_precheck()
         self._rebuild_pending_rows()
+        self._notify_missing_exif()
         bad = sum(1 for v in self.precheck.values() if v)
         head = f"导入 {added} 张（去重后共 {len(self.files)} 张）；无需逐张设置。"
-        if bad:
-            self._set_status(
-                f"{head} 预检发现 {bad} 张缺少/异常 EXIF 拍摄日期，按客户口径会判失败；"
-                "请重新导出保留 EXIF 的原图（避免微信/截图传输）。")
-        else:
-            self._set_status(head + " 全部通过 EXIF 预检，可开始批量处理。")
+        self._set_status(head + (f" 其中 {bad} 张缺少 EXIF 信息，已弹出提示并列入待处理清单。"
+                                if bad else " 全部含 EXIF 信息，可开始批量处理。"))
         if added:
             self.nb.select(self.tab_results)
 
     def _run_precheck(self) -> None:
-        """导入后轻量预检 EXIF（只读文件头，不解码 50MP 大图）。"""
-        self.precheck = {}
-        cfg = self._collect_config()
-        if not cfg.precheck_exif or not cfg.watermark_enabled or cfg.time_source != "exif":
+        """EXIF 检查：固定、无条件执行，唯一依据是照片 EXIF 中是否存在拍摄日期。
+
+        不读取文件名、文件时间、JPEG 其它数据段，也不受任何配置项影响。
+        """
+        self.precheck = {
+            p: ("" if has_exif_capture_time(p) else EXIF_MISSING_REASON)
+            for p in self.files
+        }
+
+    def _notify_missing_exif(self) -> None:
+        """发现新增的缺 EXIF 照片时弹出一次提示窗口；含 EXIF 的照片不触发。
+
+        文案由 engine 常量统一提供，简洁且不附加任何额外字样。
+        弹窗之外仍保留状态表标记与失败清单，保证缺 EXIF 不被静默跳过。
+        """
+        missing = [p for p, issue in self.precheck.items() if issue]
+        fresh = [p for p in missing if p not in self.exif_notified]
+        if not fresh:
             return
-        for p in self.files:
-            self.precheck[p] = precheck_exif(p)
+        self.exif_notified.update(fresh)
+        messagebox.showwarning(EXIF_NOTICE_TITLE, EXIF_NOTICE_MESSAGE)
 
     def _clear_files(self) -> None:
         if self.busy:
@@ -588,6 +601,7 @@ class App(tk.Tk):
         self.files.clear()
         self.results.clear()
         self.precheck.clear()
+        self.exif_notified.clear()
         self.summary = None
         self.report_paths.clear()
         self.tree.delete(*self.tree.get_children())
@@ -603,8 +617,8 @@ class App(tk.Tk):
         for i, p in enumerate(self.files, 1):
             issue = self.precheck.get(p, "")
             self.tree.insert("", "end", iid=str(i),
-                             values=(i, Path(p).name, "", "需补原图" if issue else "待处理",
-                                     "EXIF 预检" if issue else "", issue, ""),
+                             values=(i, Path(p).name, "", "缺少 EXIF" if issue else "待处理",
+                                     "EXIF 检查" if issue else "", issue, ""),
                              tags=("warn",) if issue else ("pending",))
         self.progress.configure(maximum=max(1, len(self.files)), value=0)
         self.progress_label.configure(text=f"0 / {len(self.files)}")
@@ -626,6 +640,10 @@ class App(tk.Tk):
         if not self.files:
             messagebox.showinfo("请先导入照片", "请点击「添加照片」或「添加文件夹」批量导入后再开始。")
             return
+        # 处理前再按同一纯 EXIF 条件复核一次（已弹窗提示过的不会重复弹出），
+        # 保证任何入口下缺 EXIF 都不会被静默跳过。
+        self._run_precheck()
+        self._notify_missing_exif()
         if Path(cfg.output_dir).resolve() in {Path(p).parent.resolve() for p in self.files}:
             if not messagebox.askyesno(
                     "输出目录与源照片目录相同",
