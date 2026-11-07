@@ -45,12 +45,23 @@ def main() -> int:
     # 恢复默认 + 应用预置（不应清空输出目录）
     app._restore_default()
     d = app._collect_config()
-    assert d.target_width == 2400 and d.font_size == 70
+    assert (d.target_width == 5292 and d.font_size == 70
+            and d.resize_mode == "none" and d.min_output_megapixels == 21
+            and d.filename_template == "{ecu}_{serial}_{seq}")
     app.vars["output_dir"].set(str(out))
     app._apply_preset()
     d = app._collect_config()
     assert d.output_dir == str(out), "应用预置不应清空输出目录"
     print("[3] 恢复默认 / 应用预置正常，输出目录保持不变")
+
+    # 切回合成小图的测试基线（v1.1.0 默认是不缩放 + ≥21MP + 合规命名）
+    app.vars["ecu_name"].set("EEPH")
+    app.vars["serial_number"].set("TESTSERIAL")
+    app.vars["min_output_megapixels"].set("0")
+    app.vars["target_width"].set("2400")
+    app.vars["target_height"].set("1800")
+    app.vars["filename_template"].set("{name}_结果")
+    app.widgets["resize_mode"].set_value("contain")
 
     # 批量导入（一次导入，无需逐张设置）
     app._merge_files([str(p) for p in samples])

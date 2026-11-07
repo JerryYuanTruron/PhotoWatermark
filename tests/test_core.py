@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import struct
 import sys
 import tempfile
 from datetime import datetime
@@ -21,11 +22,24 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src import config, engine, reporter  # noqa: E402
+from src import __version__, config, engine, reporter  # noqa: E402
 from tests.make_samples import build  # noqa: E402
 
 PASS: list[str] = []
 FAIL: list[str] = []
+
+
+def C(**kw) -> config.RuleConfig:
+    """测试基线配置：沿用 v1.0.0 的合成小图口径（2400×1800、{name}_结果）。
+
+    v1.1.0 起默认改为「不缩放 + ≥21MP + 合规命名」，这几项对 1200×900 合成样本
+    不适用，故在通用测试里显式关闭；默认行为由 J 组单独验证。
+    """
+    base = dict(resize_mode="contain", target_width=2400, target_height=1800,
+                min_output_megapixels=0, filename_template="{name}_结果",
+                ecu_name="EEPH", serial_number="TESTSERIAL")
+    base.update(kw)
+    return config.RuleConfig(**base)
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -65,7 +79,7 @@ def main() -> int:
 
     # ------------------------------------------------------------------
     print("\n[A] 规则配置")
-    c = config.RuleConfig()
+    c = C()
     check("A1 文档默认值", (c.target_width, c.target_height, c.dpi, c.font_size,
                             c.position, c.time_format) ==
           (2400, 1800, 300, 70, "bottom_right", "%Y/%m/%d %H:%M:%S"))
@@ -74,12 +88,12 @@ def main() -> int:
     c2 = config.RuleConfig.from_dict({"target_width": "1234", "dpi": None,
                                       "unknown_key": 1, "jpeg_quality": 999})
     check("A3 残缺/未知字段安全载入", c2.target_width == 1234 and c2.dpi == 300)
-    check("A4 非法参数被校验拦截", config.RuleConfig(target_width=0, dpi=0,
+    check("A4 非法参数被校验拦截", C(target_width=0, dpi=0,
                                                     output_dir=str(ROOT / "_test_runs")).validate() != [])
     tmp_json = ROOT / "_test_runs" / "rule.json"
     c.save(tmp_json)
     check("A5 规则文件 JSON 往返", config.RuleConfig.load(tmp_json).time_format == c.time_format)
-    check("A6 pt 单位按 DPI 换算", config.RuleConfig(font_size=72, font_size_unit="pt",
+    check("A6 pt 单位按 DPI 换算", C(font_size=72, font_size_unit="pt",
                                                     dpi=300).effective_font_px() == 300)
     check("A7 三套预置均可实例化且字段不同",
           len({config.preset_config(n).target_width for n in config.PRESETS}) >= 2)
@@ -104,7 +118,7 @@ def main() -> int:
     print("\n[C] 尺寸与像素规格")
     for mode, exp in (("contain", (2400, 1800)), ("cover", (2400, 1800)),
                       ("stretch", (2400, 1800)), ("none", (1200, 900))):
-        cfg = config.RuleConfig(resize_mode=mode, output_dir=str(fresh("size_" + mode)))
+        cfg = C(resize_mode=mode, output_dir=str(fresh("size_" + mode)))
         rs = run([good], cfg)
         out = Path(rs[0].output_path)
         with Image.open(out) as chk:
@@ -112,18 +126,18 @@ def main() -> int:
             check(f"C2 {mode} DPI=300",
                   chk.info.get("dpi") is not None and abs(chk.info["dpi"][0] - 300) < 2,
                   str(chk.info.get("dpi")))
-    cfg = config.RuleConfig(output_dir=str(fresh("portrait")))
+    cfg = C(output_dir=str(fresh("portrait")))
     rs = run([portrait], cfg)
     with Image.open(rs[0].output_path) as chk:
         check("C3 竖图 contain 输出仍为统一 2400×1800", chk.size == (2400, 1800))
-    cfg = config.RuleConfig(output_dir=str(fresh("orient")), resize_mode="none")
+    cfg = C(output_dir=str(fresh("orient")), resize_mode="none")
     rs = run([orient], cfg)
     with Image.open(rs[0].output_path) as chk:
         ex = chk.getexif()
         check("C4 EXIF 方向已校正且方向标签清除",
               chk.size == (900, 1200) and ex.get(0x0112) is None,
               f"size={chk.size}, orientation={ex.get(0x0112)}")
-    cfg = config.RuleConfig(output_dir=str(fresh("formats")))
+    cfg = C(output_dir=str(fresh("formats")))
     rs = run([png], cfg)
     with Image.open(rs[0].output_path) as chk:
         check("C5 PNG 输入同原格式→PNG 输出且保留 EXIF",
@@ -131,7 +145,7 @@ def main() -> int:
 
     # ------------------------------------------------------------------
     print("\n[D] 时间水印（文档 3.5 / 3.7 / 3.8）")
-    cfg = config.RuleConfig(output_dir=str(fresh("watermark")))
+    cfg = C(output_dir=str(fresh("watermark")))
     rs = run([good], cfg)
     r = rs[0]
     check("D1 水印文本为 年/月/日 时:分:秒", r.watermark_text == "2026/05/22 16:29:01")
@@ -139,37 +153,37 @@ def main() -> int:
           r.watermark_rect is not None and r.watermark_rect[2] >= 2300
           and r.watermark_rect[3] >= 1700, str(r.watermark_rect))
     for pos, where in (("top_left", "左上"), ("center", "正中"), ("bottom_left", "左下")):
-        cfg = config.RuleConfig(output_dir=str(fresh("pos_" + pos)), position=pos)
+        cfg = C(output_dir=str(fresh("pos_" + pos)), position=pos)
         rr = run([good], cfg)[0]
         rect = rr.watermark_rect or (0, 0, 0, 0)
         ok = ({"top_left": rect[0] < 50 and rect[1] < 50,
                "center": abs(rect[0] + rect[2] - 2400) < 200,
                "bottom_left": rect[0] < 50 and rect[3] > 1700}[pos])
         check(f"D3 位置 {where} 生效", ok, str(rect))
-    cfg = config.RuleConfig(output_dir=str(fresh("template")),
+    cfg = C(output_dir=str(fresh("template")),
                             content_template="{filename} | {seq} | {time}")
     rr = run([good], cfg)[0]
     check("D4 内容模板 token 替换",
           rr.watermark_text == "PeCu_2718281828_0001 | 0001 | 2026/05/22 16:29:01",
           rr.watermark_text)
-    cfg = config.RuleConfig(output_dir=str(fresh("dashfmt")), time_format="%Y-%m-%d %H:%M:%S")
+    cfg = C(output_dir=str(fresh("dashfmt")), time_format="%Y-%m-%d %H:%M:%S")
     check("D5 时间格式可改", run([good], cfg)[0].watermark_text == "2026-05-22 16:29:01")
-    cfg = config.RuleConfig(output_dir=str(fresh("nosha")), shadow_enabled=False,
+    cfg = C(output_dir=str(fresh("nosha")), shadow_enabled=False,
                             font_family="黑体", font_size=120)
     check("D6 字体/阴影/字号可改且仍成功", run([good], cfg)[0].ok)
-    cfg = config.RuleConfig(output_dir=str(fresh("longfmt")), font_size=500,
+    cfg = C(output_dir=str(fresh("longfmt")), font_size=500,
                             time_format="拍摄时间 %Y年%m月%d日 %H时%M分%S秒 样品编号ABCDEF")
     rr = run([tiny], cfg)[0]
     check("D7 超宽时间戳自动缩字号不截断",
           rr.ok and any("自动缩小" in w for w in rr.warnings), str(rr.warnings))
-    cfg = config.RuleConfig(output_dir=str(fresh("no_wm")), watermark_enabled=False)
+    cfg = C(output_dir=str(fresh("no_wm")), watermark_enabled=False)
     rr = run([noexif], cfg)[0]
     check("D8 关闭水印后无 EXIF 照片也可正常输出", rr.ok and rr.watermark_text == "")
 
     # ------------------------------------------------------------------
     print("\n[E] 失败识别、策略与清理")
     base = fresh("fail")
-    cfg = config.RuleConfig(output_dir=str(base))
+    cfg = C(output_dir=str(base))
     rs = run([good, noexif, broken, notimage, good.with_name("MISSING.jpg")], cfg)
     reasons = [(r.status, r.stage, r.reason) for r in rs]
     check("E1 正常照片成功", rs[0].status == engine.STATUS_SUCCESS)
@@ -188,33 +202,33 @@ def main() -> int:
     check("E7 输出目录只含合格成品",
           len(list(base.iterdir())) == 1, str([p.name for p in base.iterdir()]))
 
-    cfg = config.RuleConfig(output_dir=str(fresh("policy_use_file_mtime")),
+    cfg = C(output_dir=str(fresh("policy_use_file_mtime")),
                             missing_exif_policy="use_file_mtime")
     rr = run([noexif], cfg)[0]
     check("E8 EXIF缺失策略 use_file_mtime → 警告且说明非拍摄日期",
           rr.status == engine.STATUS_WARNING and any("非 EXIF 拍摄日期" in w for w in rr.warnings),
           f"{rr.status} {rr.warnings}")
-    cfg = config.RuleConfig(output_dir=str(fresh("policy_no_watermark")),
+    cfg = C(output_dir=str(fresh("policy_no_watermark")),
                             missing_exif_policy="no_watermark")
     rr = run([noexif], cfg)[0]
     check("E8b EXIF缺失策略 no_watermark → 判失败（成品无时间戳不可交付）",
           rr.status == engine.STATUS_FAILED and "不含可见时间戳" in rr.reason,
           f"{rr.status} {rr.reason}")
 
-    cfg = config.RuleConfig(output_dir=str(fresh("mtime")), time_source="file_mtime")
+    cfg = C(output_dir=str(fresh("mtime")), time_source="file_mtime")
     rr = run([noexif], cfg)[0]
     check("E9 时间来源改为文件修改时间可用且有告警", rr.ok and rr.warnings)
-    cfg = config.RuleConfig(output_dir=str(fresh("fixed")), time_source="fixed",
+    cfg = C(output_dir=str(fresh("fixed")), time_source="fixed",
                             fixed_time_text="2026/11/07 12:00:00")
     check("E10 固定文本内容生效",
           run([noexif], cfg)[0].watermark_text == "2026/11/07 12:00:00")
-    cfg = config.RuleConfig(output_dir=str(fresh("badfont")), font_path=r"Z:\nonexistent\font.ttf",
+    cfg = C(output_dir=str(fresh("badfont")), font_path=r"Z:\nonexistent\font.ttf",
                             font_family="不存在字体")
     rr = run([good], cfg)[0]
     check("E11 字体不存在时回退到系统字体而非整批失败", rr.ok, str(rr.reason))
 
     # 模拟输出校验失败，验证残留成品被清理
-    cfg = config.RuleConfig(output_dir=str(fresh("verify_fail")))
+    cfg = C(output_dir=str(fresh("verify_fail")))
     with mock.patch.object(engine, "_verify_output",
                            return_value=(False, "模拟校验失败", (0, 0), None)):
         rr = run([good], cfg)[0]
@@ -225,27 +239,27 @@ def main() -> int:
 
     # ------------------------------------------------------------------
     print("\n[F] 输出命名与同名策略")
-    cfg = config.RuleConfig(output_dir=str(fresh("names")), filename_template="{name}")
+    cfg = C(output_dir=str(fresh("names")), filename_template="{name}")
     rr = run([good], cfg)[0]
     check("F1 {name} 保持原名（不追加 _结果 后缀）",
           Path(rr.output_path).stem == "PeCu_2718281828_0001", Path(rr.output_path).name)
-    cfg = config.RuleConfig(output_dir=str(fresh("seqname")), filename_template="{seq}_{name}")
+    cfg = C(output_dir=str(fresh("seqname")), filename_template="{seq}_{name}")
     check("F2 序号模板生效", Path(run([good], cfg)[0].output_path).name.startswith("0001_"))
-    cfg = config.RuleConfig(output_dir=str(fresh("illegal")),
+    cfg = C(output_dir=str(fresh("illegal")),
                             filename_template=r'{name}:*?_结果')
     rr = run([good], cfg)[0]
     check("F3 模板含非法字符被安全替换", rr.ok and Path(rr.output_path).is_file(),
           Path(rr.output_path).name if rr.output_path else "")
     dup = fresh("dup")
-    cfg = config.RuleConfig(output_dir=str(dup))
+    cfg = C(output_dir=str(dup))
     first = run([good, good], cfg)
     check("F4 同名输入自动去重另存，不互相覆盖",
           len({r.output_path for r in first}) == 2 and len(list(dup.glob("*.jpg"))) == 2)
     cfg.on_exists = "skip"
-    second = run([good], config.RuleConfig(output_dir=str(dup), on_exists="skip",
+    second = run([good], C(output_dir=str(dup), on_exists="skip",
                                            filename_template="{name}_结果"))
     check("F5 同名策略 skip 生效", second[0].status == engine.STATUS_SKIPPED)
-    cfg2 = config.RuleConfig(output_dir=str(fresh("rename")), on_exists="rename",
+    cfg2 = C(output_dir=str(fresh("rename")), on_exists="rename",
                              filename_template="{name}")
     run([good], cfg2)
     run([good], cfg2)
@@ -255,7 +269,7 @@ def main() -> int:
     # ------------------------------------------------------------------
     print("\n[G] 报告、批次审计与一致性")
     out = fresh("report")
-    cfg = config.RuleConfig(output_dir=str(out))
+    cfg = C(output_dir=str(out))
     all_files = [good, noexif, broken, notimage, png, portrait, orient, tiny]
     rs = run(all_files, cfg)
     st, fi = datetime.now(), datetime.now()
@@ -269,9 +283,11 @@ def main() -> int:
           csv_bytes.startswith(b"\xef\xbb\xbf") and "NOEXIF_0004.jpg" in csv_text
           and "缺少 EXIF 拍摄日期" in csv_text)
     payload = json.loads(Path(paths["处理报告JSON"]).read_text(encoding="utf-8"))
+    # 版本期望值从源码读取，断言「报告版本 == 源码声明版本」这一跨版本恒真关系，
+    # 不写死 1.0.0/1.1.0（升版即假红）。
     check("G4 报告含版本/配置快照/逐张结果",
-          payload["version"] == "1.0.0" and payload["config"]["dpi"] == 300
-          and len(payload["results"]) == 8)
+          payload["version"] == __version__ and payload["config"]["dpi"] == 300
+          and len(payload["results"]) == 8, payload.get("version"))
     check("G5 批次审计通过", any("通过" in a for a in s.audit), str(s.audit))
     sizes = set()
     dpis = set()
@@ -282,24 +298,24 @@ def main() -> int:
     check("G6 所有 JPEG 成品尺寸/DPI 完全一致",
           sizes == {(2400, 1800)} and dpis == {300}, f"{sizes} {dpis}")
     check("G7 中文/特殊路径可用",
-          config.RuleConfig(output_dir=str(ROOT / "_test_runs" / "中文 目录 (1)")).validate() == [])
+          C(output_dir=str(ROOT / "_test_runs" / "中文 目录 (1)")).validate() == [])
 
     # ------------------------------------------------------------------
     print("\n[H] 对抗场景")
-    cfg = config.RuleConfig(output_dir=str(fresh("zero_opacity")), font_opacity=0,
+    cfg = C(output_dir=str(fresh("zero_opacity")), font_opacity=0,
                             shadow_opacity=0)
     rr = run([good], cfg)[0]
     check("H1 全透明水印被渲染自检拦截并判失败",
           rr.status == engine.STATUS_FAILED and rr.stage == engine.STAGE_WATERMARK
           and ("水印图层为空" in rr.reason or "字体不透明度" in rr.reason),
           f"{rr.status} {rr.reason}")
-    cfg = config.RuleConfig(output_dir=str(fresh("tiny_canvas")), target_width=32,
+    cfg = C(output_dir=str(fresh("tiny_canvas")), target_width=32,
                             target_height=24, font_size=500)
     rr = run([good], cfg)[0]
     check("H2 极小画布不崩溃（失败或自动缩字号）",
           rr.status in (engine.STATUS_SUCCESS, engine.STATUS_FAILED, engine.STATUS_WARNING),
           f"{rr.status} {rr.reason}")
-    bad_cfg = config.RuleConfig(output_dir=str(fresh("badformat")), time_format="%Q-%Z")
+    bad_cfg = C(output_dir=str(fresh("badformat")), time_format="%Q-%Z")
     check("H3 非法时间格式指令被配置校验拦截",
           any("时间格式" in e for e in bad_cfg.validate()), str(bad_cfg.validate()))
     rr = run([good], bad_cfg)[0]
@@ -307,7 +323,7 @@ def main() -> int:
     src_copy_dir = fresh("out_equals_src")
     src_copy = src_copy_dir / "sample.jpg"
     shutil.copy2(good, src_copy)
-    cfg = config.RuleConfig(output_dir=str(src_copy_dir), filename_template="{name}")
+    cfg = C(output_dir=str(src_copy_dir), filename_template="{name}")
     rr = run([src_copy], cfg)[0]
     check("H4 输出目录=源目录时不覆盖原图",
           rr.ok and Path(rr.output_path).resolve() != src_copy.resolve(),
@@ -317,14 +333,14 @@ def main() -> int:
 
     # ------------------------------------------------------------------
     print("\n[I] 对抗式审查回归（独立审查复现的高危场景）")
-    cfg = config.RuleConfig(output_dir=str(fresh("invisible")), font_opacity=0,
+    cfg = C(output_dir=str(fresh("invisible")), font_opacity=0,
                             shadow_opacity=70)
     rr = run([good], cfg)[0]
     check("I1 文字全透明+有阴影 不再判成功",
           rr.status == engine.STATUS_FAILED, f"{rr.status} {rr.reason}")
     check("I1b 配置校验拦截 font_opacity=0",
           any("字体不透明度" in e for e in cfg.validate()), str(cfg.validate()))
-    cfg = config.RuleConfig(output_dir=str(fresh("no_token")), content_template="PHOTO OK")
+    cfg = C(output_dir=str(fresh("no_token")), content_template="PHOTO OK")
     rr = run([good], cfg)[0]
     check("I2 水印模板不含 {time} 被拦截",
           rr.status == engine.STATUS_FAILED and "不含时间戳" in rr.reason,
@@ -335,12 +351,12 @@ def main() -> int:
         Image.open(by_name["PeCu_2718281828_0002.jpg"]).getexif())
     check("I3 回退到 DateTime 时显式报告偏差",
           tag3 == "DateTime" and "非拍摄日期" in note3, f"{tag3} / {note3}")
-    cfg = config.RuleConfig(output_dir=str(fresh("fallback_note")))
+    cfg = C(output_dir=str(fresh("fallback_note")))
     rr = run([by_name["PeCu_2718281828_0002.jpg"]], cfg)[0]
     check("I3b 回退时间戳成品降级为警告",
           rr.status == engine.STATUS_WARNING and any("非 EXIF 拍摄日期" in w for w in rr.warnings),
           f"{rr.status} {rr.warnings}")
-    cfg = config.RuleConfig(output_dir=str(fresh("fixed_note")), time_source="fixed",
+    cfg = C(output_dir=str(fresh("fixed_note")), time_source="fixed",
                             fixed_time_text="2026/11/07 12:00:00")
     rr = run([good], cfg)[0]
     check("I3c 固定文本也降级为警告",
@@ -354,7 +370,7 @@ def main() -> int:
     shutil.copy2(good, a)
     shutil.copy2(by_name["PeCu_2718281828_0002.jpg"], b)
     b_before = b.read_bytes()
-    cfg = config.RuleConfig(output_dir=str(coll))
+    cfg = C(output_dir=str(coll))
     protected = {str(x.resolve()).lower() for x in (a, b)}
     used: set[str] = set()
     r1 = engine.process_one(a, cfg, 1, used, protected)
@@ -366,7 +382,7 @@ def main() -> int:
 
     # H5：导出阶段中途异常不得残留半成品，且批次审计必须发现
     leak = fresh("export_leak")
-    cfg = config.RuleConfig(output_dir=str(leak))
+    cfg = C(output_dir=str(leak))
     original_save = engine._save_image
 
     def broken_save(img, path, fmt, c, raw_exif, icc=None):
@@ -387,24 +403,98 @@ def main() -> int:
     keep = fresh("keep_old")
     old = keep / "PeCu_2718281828_0001_结果.jpg"
     old.write_bytes(b"PREEXISTING")
-    cfg = config.RuleConfig(output_dir=str(keep), min_output_bytes=10_000_000)
+    cfg = C(output_dir=str(keep), min_output_bytes=10_000_000)
     rr = run([good], cfg)[0]
     check("I6 校验失败不破坏运行前旧成品",
           rr.status == engine.STATUS_FAILED and old.read_bytes() == b"PREEXISTING",
           f"{rr.status} old={old.read_bytes()[:20]}")
 
     # 批次尺寸一致性提示
-    cfg = config.RuleConfig(output_dir=str(fresh("size_note")), resize_mode="none")
+    cfg = C(output_dir=str(fresh("size_note")), resize_mode="none")
     rs = run([good, portrait], cfg)
     s = reporter.summarize(rs, cfg, datetime.now(), datetime.now())
     findings = reporter.audit_batch(rs, cfg)
     check("I7 不缩放导致尺寸不一致时审计给出提示",
           any("尺寸不一致" in f for f in findings), str(findings))
-    cfg_scaled = config.RuleConfig(output_dir=str(fresh("pixel_note")))
-    rs2 = run([good, portrait], cfg_scaled)
-    findings2 = reporter.audit_batch(rs2, cfg_scaled)
-    check("I8 处理报告显式说明 2100 万像素边界",
-          any("2100 万像素" in f for f in findings2), str(findings2))
+    cfg_gate = C(output_dir=str(fresh("pixel_note")), resize_mode="none",
+                 min_output_megapixels=21)
+    rs2 = run([good, portrait], cfg_gate)
+    findings2 = reporter.audit_batch(rs2, cfg_gate)
+    check("I8 报告显式记录 2100 万像素合规门槛",
+          any("2100 万像素" in f and "21 MP" in f for f in findings2), str(findings2))
+
+    # ------------------------------------------------------------------
+    print("\n[J] v1.1.0 客户合规口径（V1 p.3 / V2 §8·§10·§11）")
+    d = config.RuleConfig()
+    check("J1 程序默认即为合规口径",
+          d.resize_mode == "none" and d.min_output_megapixels == 21
+          and d.filename_template == "{ecu}_{serial}_{seq}"
+          and d.time_source == "exif" and d.missing_exif_policy == "fail"
+          and d.ecu_name == "" and d.serial_number == "",
+          f"{d.resize_mode}/{d.min_output_megapixels}/{d.filename_template}")
+    check("J2 默认配置强制要求填写命名前缀",
+          any("ECU 名称" in e for e in C(ecu_name="", serial_number="",
+                                         filename_template="{ecu}_{serial}_{seq}").validate()), "")
+    check("J3 目标尺寸低于 21MP 被配置校验拦截",
+          any("低于客户要求" in e for e in C(
+              resize_mode="contain", target_width=2400, target_height=1800,
+              min_output_megapixels=21).validate()), "")
+    check("J4 21MP 目标尺寸(5292×3969)通过校验",
+          not any("低于客户要求" in e for e in C(
+              resize_mode="contain", target_width=5292, target_height=3969,
+              min_output_megapixels=21).validate()), "")
+    low = fresh("pixel_gate")
+    cfg_low = C(output_dir=str(low), resize_mode="none", min_output_megapixels=21)
+    rl = run([good], cfg_low)[0]
+    check("J5 主输出像素不足时判失败且无残留",
+          rl.status == engine.STATUS_FAILED and rl.stage == engine.STAGE_VERIFY
+          and "低于客户要求" in rl.reason and not list(low.glob("*.jpg")),
+          f"{rl.status} {rl.reason[:80]}")
+
+    named = fresh("naming")
+    cfg_name = C(output_dir=str(named), filename_template="{ecu}_{serial}_{seq}",
+                 ecu_name="EEPH", serial_number="T55B92BD20126B119X", start_index=7)
+    rn = run([good], cfg_name)[0]
+    check("J6 合规命名生成 <ECU>_<序列号>_<四位序号>",
+          rn.ok and Path(rn.output_path).name == "EEPH_T55B92BD20126B119X_0007.jpg",
+          Path(rn.output_path).name if rn.output_path else "")
+    check("J7 命名 token 未留字面量占位符",
+          "{" not in Path(rn.output_path).name, rn.output_path)
+
+    # 构造「微信改写主 IFD、EXIF 时间被剥离但 APP1 残留相机时间」的合成样本
+    wx_dir = fresh("wechat_like")
+    wx = wx_dir / "wechat_like.jpg"
+    Image.new("RGB", (64, 48), (100, 120, 140)).save(wx, format="JPEG", quality=90)
+    raw = wx.read_bytes()
+    tiff = (b"MM\x00*\x00\x00\x00\x08" + b"\x00\x00" + b"\x00\x00\x00\x00"
+            + b"2026:11:02 15:52:21\x00")
+    app1_payload = b"Exif\x00\x00" + tiff
+    seg = b"\xff\xe1" + struct.pack(">H", len(app1_payload) + 2) + app1_payload
+    wx.write_bytes(raw[:2] + seg + raw[2:])
+    check("J8 预检识别剥离 EXIF 的照片",
+          "缺少 EXIF 拍摄日期" in engine.precheck_exif(wx), engine.precheck_exif(wx))
+    check("J9 正常照片预检通过", engine.precheck_exif(good) == "", engine.precheck_exif(good))
+    recovered = engine.diagnose_app1_capture_time(wx)
+    check("J10 可诊断 APP1 残留相机时间", recovered == "2026:11:02 15:52:21", recovered)
+    cfg_wx = C(output_dir=str(wx_dir / "out"), missing_exif_policy="fail")
+    rw = run([wx], cfg_wx)[0]
+    check("J11 残留时间仅作诊断，绝不用于水印",
+          rw.status == engine.STATUS_FAILED and "APP1 残留相机时间" in rw.reason
+          and rw.watermark_text == "" and rw.output_path == "",
+          f"{rw.status} {rw.reason[:110]}")
+
+    rc_dir = fresh("report_copy")
+    cfg_rc = C(output_dir=str(rc_dir), resize_mode="none",
+               target_width=1600, target_height=1200, report_copy_enabled=True)
+    rrc = run([good], cfg_rc)[0]
+    copies = sorted(p.name for p in rc_dir.glob("*.jpg"))
+    check("J12 可选报告插图副本生成且不替代主交付原件",
+          rrc.ok and bool(rrc.report_copy_path) and len(copies) == 2
+          and any("_报告版" in n for n in copies)
+          and any("报告插图副本" in w for w in rrc.warnings), str(copies))
+    check("J13 报告副本水印与主输出同源",
+          bool(rrc.watermark_text) and rrc.watermark_text == "2026/05/22 16:29:01",
+          rrc.watermark_text)
 
     # ------------------------------------------------------------------
     print("\n" + "=" * 68)

@@ -148,7 +148,10 @@ def main() -> int:
         ck("2.6 无自检错误", data.get("ok") is True and not data.get("errors"),
            data.get("errors"))
         for marker in ("guard_invisible_watermark", "guard_missing_time_token",
-                       "exif_diagnostics", "no_temp_residue", "attempted_output_recorded"):
+                       "exif_diagnostics", "no_temp_residue", "attempted_output_recorded",
+                       "compliant_naming_template", "guard_pixel_spec",
+                       "guard_naming_required", "strict_exif_policy",
+                       "precheck_available", "compliant_output_name"):
             item = (data.get("checks") or {}).get(marker, {})
             ck(f"2.7 产物含本版行为标记 / {marker}", item.get("ok") is True,
                item.get("detail", "缺失"))
