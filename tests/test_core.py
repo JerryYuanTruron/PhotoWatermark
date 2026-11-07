@@ -635,6 +635,45 @@ def main() -> int:
           ro.ok and actual == (1200, 900), f"{ro.status} {actual} {ro.reason[:60]}")
 
     # ------------------------------------------------------------------
+    print("\n[L] 同名覆盖防护（默认不覆盖 + 开始前可统计）")
+    check("L1 默认同名策略为「自动加序号另存」",
+          config.RuleConfig().on_exists == "rename"
+          and next(iter(config.ON_EXISTS)) == "rename",
+          config.RuleConfig().on_exists)
+    dup = fresh("dup")
+    cfg_dup = C(output_dir=str(dup), filename_template="{ecu}_{serial}_{seq}",
+                ecu_name="EEPH", serial_number="DUP")
+    first = run([good], cfg_dup)[0]
+    p1 = Path(first.output_path)
+    check("L2 预测名称与实际输出一致",
+          engine.plan_output_names([good], cfg_dup)[0].name == p1.name, p1.name)
+    check("L3 开始前能统计到同名文件",
+          sum(1 for p in engine.plan_output_names([good], cfg_dup) if p.exists()) == 1,
+          str([p.name for p in engine.plan_output_names([good], cfg_dup)]))
+    before = p1.read_bytes()
+    second = run([good], cfg_dup)[0]
+    p2 = Path(second.output_path)
+    check("L4 默认不覆盖：自动加序号另存，原成品内容不变",
+          second.ok and p2 != p1 and p2.name == f"{p1.stem}_1{p1.suffix}"
+          and p1.read_bytes() == before, f"{p1.name} -> {p2.name}")
+    ov = fresh("dup_overwrite")
+    cfg_ov = C(output_dir=str(ov), filename_template="{ecu}_{serial}_{seq}",
+               ecu_name="EEPH", serial_number="DUP", on_exists="overwrite")
+    o1 = run([good], cfg_ov)[0]
+    o2 = run([good], cfg_ov)[0]
+    check("L5 显式选择覆盖时仍按覆盖执行（目录内仅 1 个成品）",
+          o1.output_path == o2.output_path and len(list(ov.glob("*.jpg"))) == 1,
+          str([p.name for p in ov.glob("*.jpg")]))
+    sk = fresh("dup_skip")
+    cfg_sk = C(output_dir=str(sk), filename_template="{ecu}_{serial}_{seq}",
+               ecu_name="EEPH", serial_number="DUP", on_exists="skip")
+    run([good], cfg_sk)
+    s2 = run([good], cfg_sk)[0]
+    check("L6 显式选择跳过时第二轮判跳过且不新增文件",
+          s2.status == engine.STATUS_SKIPPED and len(list(sk.glob("*.jpg"))) == 1,
+          f"{s2.status} {[p.name for p in sk.glob('*.jpg')]}")
+
+    # ------------------------------------------------------------------
     print("\n" + "=" * 68)
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
     for f in FAIL:

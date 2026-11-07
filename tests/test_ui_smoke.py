@@ -25,6 +25,8 @@ from tests.make_samples import build  # noqa: E402
 
 
 POPUPS: list[tuple[str, str, str]] = []
+ASKS: list[tuple[str, str]] = []
+ASK_RETURN = [True]
 GEOMETRY_CALLS: list[list[engine.GeometryIssue]] = []
 REAL_SHOW_GEOMETRY = ui.show_geometry_notice
 
@@ -38,7 +40,11 @@ def main() -> int:
 
     for name in ("showinfo", "showwarning", "showerror"):
         setattr(messagebox, name, record(name))
-    messagebox.askyesno = lambda *a, **k: True  # type: ignore[assignment]
+    def ask_yes(title, message, *a, **k):
+        ASKS.append((str(title), str(message)))
+        return ASK_RETURN[0]
+
+    messagebox.askyesno = ask_yes  # type: ignore[assignment]
     # 记录比例/方向提示窗口的调用（不真正弹窗，便于无人值守断言）
     ui.show_geometry_notice = lambda parent, issues: (
         GEOMETRY_CALLS.append(list(issues)) or None)
@@ -253,6 +259,39 @@ def main() -> int:
     assert "知道了" in btn_texts, btn_texts
     win.destroy()
     print("[10d] 真实提示窗口为非模态、正文与统一文案一致")
+
+    # --- [11] 同名覆盖防护：默认不覆盖 + 开始前统计并提示 ---
+    dup_out = out / "dup"
+    dup_out.mkdir(parents=True, exist_ok=True)
+    app.vars["ecu_name"].set("EEPH")
+    app.vars["serial_number"].set("DUP")
+    app.vars["output_dir"].set(str(dup_out))
+    app.vars["filename_template"].set("{ecu}_{serial}_{seq}")
+    app.widgets["resize_mode"].set_value("contain")
+    app.update()
+    cfg_dup = app._collect_config()
+    assert cfg_dup.on_exists == "rename", cfg_dup.on_exists
+    ASKS.clear()
+    assert app._confirm_name_collisions(cfg_dup) is True and not ASKS, ASKS
+
+    target = engine.plan_output_names([str(wide)], cfg_dup)[0]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"placeholder")
+    ASKS.clear()
+    assert app._confirm_name_collisions(cfg_dup) is True
+    assert ASKS and "不会覆盖" in ASKS[-1][0] and "自动加序号" in ASKS[-1][1], ASKS
+
+    ASK_RETURN[0] = False
+    ASKS.clear()
+    assert app._confirm_name_collisions(cfg_dup) is False, "操作人员取消时应中止"
+    ASK_RETURN[0] = True
+
+    cfg_ov = app._collect_config()
+    cfg_ov.on_exists = "overwrite"
+    ASKS.clear()
+    app._confirm_name_collisions(cfg_ov)
+    assert ASKS and "覆盖" in ASKS[-1][0] and "不可恢复" in ASKS[-1][1], ASKS
+    print("[11] 同名覆盖防护：默认不覆盖并提示；显式覆盖时二次确认")
 
     app._on_close()
     print("\nGUI 冒烟测试全部通过")
