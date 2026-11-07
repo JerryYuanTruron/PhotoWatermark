@@ -76,8 +76,9 @@ def main() -> int:
     # 配置往返（只涉及非水印项；水印恒为系统固定值）
     c0 = app._collect_config()
     assert c0.target_width == 5292 and c0.resize_mode == "crop43"
-    assert (c0.time_format, c0.content_template, c0.font_size, c0.position) == (
-        config.WATERMARK_TIME_FORMAT, "{time}", 70, "bottom_right")
+    assert (c0.time_format, c0.content_template, c0.font_size, c0.position,
+            c0.font_color) == (
+        config.WATERMARK_TIME_FORMAT, "{time}", 210, "bottom_right", "auto")
     c1 = config.RuleConfig(target_width=1234, dpi=200, jpeg_quality=88,
                            on_exists="rename", output_dir=str(out))
     app._apply_config(c1)

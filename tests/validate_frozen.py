@@ -154,6 +154,9 @@ def main() -> int:
                        "guard_naming_required", "strict_exif_policy",
                        "compliant_output_name", "exif_only_trigger", "notice_clean",
                        "no_source_diagnostics", "precheck_uses_uniform_text",
+                       "watermark_font_tripled", "watermark_ink_auto",
+                       "watermark_light_bg_dark_ink", "watermark_dark_bg_light_ink",
+                       "watermark_contrast_ok",
                        "geometry_check_available", "geometry_compliant",
                        "geometry_portrait_manual", "geometry_ratio_advice",
                        "geometry_direction_reliable", "geometry_notice_wording"):

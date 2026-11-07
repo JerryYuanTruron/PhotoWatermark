@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -82,13 +82,13 @@ def main() -> int:
     c = C()
     check("A1 文档默认值", (c.target_width, c.target_height, c.dpi,
                             c.font_size, c.position, c.time_format) ==
-          (2400, 1800, 300, 70, "bottom_right", "%Y/%m/%d %H:%M:%S"))
+          (2400, 1800, 300, 210, "bottom_right", "%Y/%m/%d %H:%M:%S"))
     check("A1b 时间水印默认即系统固定规格（仅时间/固定格式/不可关闭）",
           (c.time_format, c.content_template, c.watermark_enabled, c.time_source,
            c.missing_exif_policy, c.position, c.font_family, c.font_size,
-           c.font_opacity) ==
+           c.font_color, c.font_opacity) ==
           ("%Y/%m/%d %H:%M:%S", "{time}", True, "exif", "fail",
-           "bottom_right", "微软雅黑", 70, 100), "")
+           "bottom_right", "微软雅黑", 210, "auto", 100), "")
     c.output_dir = str(ROOT / "_test_runs")
     check("A2 默认配置通过校验", c.validate() == [], str(c.validate()))
     c2 = config.RuleConfig.from_dict({"target_width": "1234", "dpi": None,
@@ -174,8 +174,9 @@ def main() -> int:
     cfg = C(output_dir=str(fresh("pos_locked")), position="top_left")
     rr = run([good], cfg)[0]
     rect = rr.watermark_rect or (0, 0, 0, 0)
-    check("D3 位置不可配置：传入「左上」仍固定右下",
-          rect[0] > 1500 and rect[3] > 1700 and cfg.position == "bottom_right",
+    check("D3 位置不可配置：传入「左上」仍固定右下（右边距 24、下边距 20）",
+          rect[2] == 2400 - 24 and rect[3] == 1800 - 20
+          and cfg.position == "bottom_right",
           f"{rect} / {cfg.position}")
     cfg = C(output_dir=str(fresh("template")),
             content_template="{filename} | {seq} | {time}")
@@ -189,7 +190,7 @@ def main() -> int:
             font_family="黑体", font_size=120)
     rr = run([good], cfg)[0]
     check("D6 字体/阴影/字号不可配置：仍按系统固定规格成功出图",
-          rr.ok and cfg.font_family == "微软雅黑" and cfg.font_size == 70
+          rr.ok and cfg.font_family == "微软雅黑" and cfg.font_size == 210
           and cfg.shadow_enabled is True,
           f"{cfg.font_family}/{cfg.font_size}/{cfg.shadow_enabled}")
     cfg = C(output_dir=str(fresh("longfmt")), font_size=500,
@@ -733,6 +734,88 @@ def main() -> int:
           r5.status == engine.STATUS_WARNING and s5 == (900, 1200)
           and any("无法仅靠裁边" in w for w in r5.warnings),
           f"{r5.status} {s5} {r5.warnings}")
+
+    # ------------------------------------------------------------------
+    print("\n[N] 水印字号放大与按背景自动取色")
+    nd = fresh("ink")
+
+    def ink_img(name: str, rgb: tuple[int, int, int]) -> Path:
+        p = nd / name
+        ex = Image.Exif()
+        ex.get_ifd(0x8769)[36867] = "2026:11:05 16:08:32"
+        Image.new("RGB", (1600, 1200), rgb).save(p, quality=92, exif=ex.tobytes())
+        return p
+
+    check("N1 水印字号为原 70 px 的 3 倍（210 px）",
+          config.WATERMARK_FIXED["font_size"] == 210
+          and config.WATERMARK_FIXED["font_size"] == 70 * 3,
+          str(config.WATERMARK_FIXED["font_size"]))
+    check("N1b 字体色不再固定白色，改为按背景自动取色",
+          config.WATERMARK_FIXED["font_color"] == "auto"
+          and config.WATERMARK_FIXED["shadow_color"] == "auto", "")
+
+    light = run([ink_img("BG_LIGHT.jpg", (242, 242, 242))],
+                C(output_dir=str(fresh("ink_light"))))[0]
+    dark = run([ink_img("BG_DARK.jpg", (14, 14, 14))],
+               C(output_dir=str(fresh("ink_dark"))))[0]
+    white = run([ink_img("BG_WHITE.jpg", (255, 255, 255))],
+                C(output_dir=str(fresh("ink_white"))))[0]
+    mid = run([ink_img("BG_MID.jpg", (128, 128, 128))],
+              C(output_dir=str(fresh("ink_mid"))))[0]
+
+    check("N2 浅色背景自动改用深墨（不再是固定白色）",
+          light.ok and light.watermark_color == "#101010",
+          f"{light.status} {light.watermark_color}")
+    check("N3 深色背景自动使用浅墨",
+          dark.ok and dark.watermark_color == "#FAFAFA",
+          f"{dark.status} {dark.watermark_color}")
+    check("N4 纯白背景不会用白色水印（同色背景仍可读）",
+          white.ok and white.watermark_color == "#101010"
+          and white.watermark_contrast >= engine.WM_MIN_INK_CONTRAST,
+          f"{white.watermark_color} {white.watermark_contrast:.1f}")
+    check("N5 中灰背景选择对比度更高的一侧并达到下限",
+          mid.ok and mid.watermark_contrast >= engine.WM_MIN_INK_CONTRAST,
+          f"{mid.watermark_color} {mid.watermark_contrast:.1f}")
+    check("N6 浅/深背景的水印对比度均远超下限",
+          min(light.watermark_contrast, dark.watermark_contrast) >= 150,
+          f"{light.watermark_contrast:.0f}/{dark.watermark_contrast:.0f}")
+
+    cfg_col = C(output_dir=str(fresh("ink_forced")), font_color="#FFFFFF")
+    forced = run([ink_img("BG_FORCED.jpg", (240, 240, 240))], cfg_col)[0]
+    check("N7 字体色不可配置：传入 #FFFFFF 仍按背景自动取色",
+          forced.ok and cfg_col.font_color == "auto"
+          and forced.watermark_color == "#101010",
+          f"{forced.watermark_color} / {cfg_col.font_color}")
+
+    check("N8 字号放大后位置与边距不变（右 24 / 下 20）",
+          light.watermark_rect is not None
+          and light.watermark_rect[2] == 2400 - 24
+          and light.watermark_rect[3] == 1800 - 20,
+          str(light.watermark_rect))
+    check("N9 水印内容仍只有时间（19 字符）",
+          light.watermark_text == "2026/11/05 16:08:32", light.watermark_text)
+
+    txt = light.watermark_text
+    probe_font = ImageFont.truetype(config.resolve_font("微软雅黑", ""), 210)
+    bb = ImageDraw.Draw(Image.new("RGB", (8, 8))).textbbox(
+        (0, 0), txt, font=probe_font, anchor="lt")
+    expect_h = bb[3] - bb[1]
+    actual_h = (light.watermark_rect[3] - light.watermark_rect[1]
+                if light.watermark_rect else 0)
+    check("N10 成品实际按 210 px 字号渲染（字形高度匹配）",
+          abs(actual_h - expect_h) <= 2, f"{actual_h} vs {expect_h}")
+
+    # 输出图上的实际像素：浅色背景处必须有深色字形，深色背景处必须有浅色字形
+    def glyph_extremes(path: str, rect: tuple[int, int, int, int]) -> tuple[int, int]:
+        with Image.open(path) as im:
+            crop = im.convert("L").crop(rect)
+            lo, hi = crop.getextrema()
+            return lo, hi
+
+    lo_l, _ = glyph_extremes(light.output_path, light.watermark_rect or (0, 0, 1, 1))
+    _, hi_d = glyph_extremes(dark.output_path, dark.watermark_rect or (0, 0, 1, 1))
+    check("N11 浅色底成品含近黑字形", lo_l <= 40, str(lo_l))
+    check("N12 深色底成品含近白字形", hi_d >= 215, str(hi_d))
 
     # ------------------------------------------------------------------
     print("\n" + "=" * 68)
