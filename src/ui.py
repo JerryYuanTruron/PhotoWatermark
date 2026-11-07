@@ -45,6 +45,7 @@ from .engine import (
     check_geometry,
     geometry_notice_text,
     has_exif_capture_time,
+    plan_output_names,
     process_one,
 )
 from .reporter import BatchSummary, export_reports, summarize
@@ -767,6 +768,36 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # 批量处理
     # ------------------------------------------------------------------
+    def _confirm_name_collisions(self, cfg: RuleConfig) -> bool:
+        """开始前统计「目标文件名已存在」的数量，并按同名策略说明后果。
+
+        默认策略是「自动加序号另存」，不覆盖已有文件；只有操作人员显式改成
+        「覆盖」时才会提示不可恢复并要求二次确认。
+        """
+        try:
+            planned = plan_output_names(self.files, cfg)
+        except Exception:  # 预测失败不阻断：真正处理时仍会按同名策略处理
+            return True
+        existing = [p for p in planned if p.exists()]
+        if not existing:
+            return True
+        n = len(existing)
+        sample = "、".join(p.name for p in existing[:3])
+        more = " 等" if n > 3 else ""
+        head = f"输出目录中已有 {n} 个与本次目标同名的文件：\n{sample}{more}\n\n"
+        if cfg.on_exists == "rename":
+            title = "输出目录已有同名文件（不会覆盖）"
+            msg = head + ("当前同名策略为「自动加序号另存（默认，不覆盖）」：本次成品会另存为 "
+                          "_1、_2 …，已有文件保持不变。\n\n是否继续？")
+        elif cfg.on_exists == "skip":
+            title = "输出目录已有同名文件（将跳过）"
+            msg = head + "当前同名策略为「跳过并标记警告」：这些照片不会产出成品。\n\n是否继续？"
+        else:
+            title = "⚠ 即将覆盖已有文件"
+            msg = head + ("当前同名策略为「覆盖同名文件」：这些文件将被本次成品覆盖且不可恢复。\n"
+                          "建议改用「自动加序号另存」。是否仍要继续？")
+        return bool(messagebox.askyesno(title, msg))
+
     def _start_batch(self) -> None:
         if self.busy:
             return
@@ -797,6 +828,9 @@ class App(tk.Tk):
                     "输出目录与部分源照片位于同一文件夹。程序会避免覆盖本批次任何源照片，\n"
                     "但强烈建议另选独立输出目录以便区分原件与成品。是否仍继续？"):
                 return
+        # B4：开始前统计同名文件，按当前同名策略明确告知后果（默认不覆盖）
+        if not self._confirm_name_collisions(cfg):
+            return
 
         save_last_used(cfg)
         self.stop_event.clear()

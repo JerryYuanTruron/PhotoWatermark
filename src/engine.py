@@ -381,6 +381,40 @@ def build_output_path(
     return candidate
 
 
+def plan_output_names(files: list[str] | list[Path], cfg: RuleConfig) -> list[Path]:
+    """处理前预测每张成品的「原始目标路径」（只读，不写盘、不做同名去重）。
+
+    仅用于「开始前统计同名文件并提示」：返回的是按命名模板算出的目标名，
+    若该文件已存在，说明会命中同名策略。模板含 `{time}` 时才读取 EXIF 拍摄时间，
+    读不到就留空——只影响预测精度，不影响实际处理。
+    """
+    out_dir = Path(cfg.output_dir)
+    naming_extra = {"ecu": cfg.ecu_name.strip(), "serial": cfg.serial_number.strip()}
+    planned: list[Path] = []
+    for i, f in enumerate(files, 1):
+        src = Path(f)
+        if cfg.output_format == "PNG":
+            ext = ".png"
+        elif cfg.output_format == "同原格式" and src.suffix.lower() == ".png":
+            ext = ".png"
+        else:
+            ext = ".jpg"
+        time_text = ""
+        if "{time}" in cfg.filename_template:
+            try:
+                with Image.open(src) as im:
+                    dt, _tag, _note = read_exif_datetime_ex(im.getexif())
+                if dt is not None:
+                    time_text = dt.strftime(cfg.time_format)
+            except (OSError, ValueError, UnidentifiedImageError):
+                time_text = ""
+        name = format_content(cfg.filename_template, safe_filename_part(time_text), src.stem,
+                              cfg.start_index + i - 1, naming_extra)
+        name = (safe_filename_part(name) or src.stem)[:MAX_FILENAME_CHARS]
+        planned.append(out_dir / f"{name}{ext}")
+    return planned
+
+
 def _unique_path(base: Path, used: set[str], protected: set[str] | None = None) -> Path:
     prot = protected or set()
 

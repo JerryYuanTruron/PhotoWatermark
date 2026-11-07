@@ -56,9 +56,9 @@ EXIF_POLICIES = {
 }
 
 ON_EXISTS = {
-    "overwrite": "覆盖同名文件",
+    "rename": "自动加序号另存（默认，不覆盖）",
+    "overwrite": "覆盖同名文件（不可恢复，谨慎）",
     "skip": "跳过并标记警告",
-    "rename": "自动加序号另存",
 }
 
 # --------------------------------------------------------------------------
@@ -180,7 +180,7 @@ class RuleConfig:
     filename_template: str = "{ecu}_{serial}_{seq}"   # V1 p.3 / V2 §11 合规命名
     ecu_name: str = ""                       # 由操作人员填写，程序不预填
     serial_number: str = ""                  # 由操作人员填写，程序不预填
-    on_exists: str = "overwrite"
+    on_exists: str = "rename"                 # 默认不覆盖：同名自动加序号另存
     start_index: int = 1
     missing_exif_policy: str = "fail"        # 严格口径：缺 EXIF 即失败，要求补原图
     keep_metadata: bool = True                # 3.9 输出页签「保持元数据」
