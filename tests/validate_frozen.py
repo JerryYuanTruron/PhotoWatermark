@@ -96,12 +96,13 @@ def main() -> int:
        f"构建={m_head.group(1) if m_head else '?'}, 当前={git_head()}")
     m_dirty = re.search(r"^git_dirty\s*:\s*(\S+)", info, re.M)
     ck("0.5 构建时源码工作区干净", bool(m_dirty) and m_dirty.group(1) == "False",
-       m_dirty.group(1) if m_dirty else "未找到")
+       f"git_dirty={m_dirty.group(1) if m_dirty else '未找到'}")
     m_exe_sha = re.search(r"^exe_sha256\s*:\s*(\S+)", info, re.M)
     import hashlib as _hashlib
+    actual_sha = _hashlib.sha256(EXE.read_bytes()).hexdigest()
     ck("0.6 交付 exe 的 sha256 == BUILD_INFO 记录",
-       bool(m_exe_sha) and m_exe_sha.group(1) == _hashlib.sha256(EXE.read_bytes()).hexdigest(),
-       "exe 与构建档案不匹配（可能被替换或重新打包过）")
+       bool(m_exe_sha) and m_exe_sha.group(1) == actual_sha,
+       f"实测 {actual_sha[:16]}… / 记录 {(m_exe_sha.group(1)[:16] if m_exe_sha else '未找到')}…")
     # 源码哈希：检测「构建之后源码被改动」或「exe 是旧代码」
     recorded = dict(re.findall(r"^  (\S+\.py) = ([0-9a-f]{64})$", info, re.M))
     current = {"main.py": _hashlib.sha256((ROOT / "main.py").read_bytes()).hexdigest()}
