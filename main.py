@@ -159,7 +159,7 @@ def _selftest(workdir: str) -> int:
         g5 = engine.check_geometry(p5)
         ck("geometry_ratio_advice",
            g5 is not None and g5.kind == "landscape_ratio"
-           and all(w in g5.advice for w in ("仅旋转无法修正比例", "裁剪", "更换", "4:3")),
+           and all(w in g5.advice for w in ("自动居中裁边", "无需手工调整", "无需")),
            g5.brief if g5 else "")
         ex6 = Image.Exif()
         ex6[0x0112] = 6
@@ -173,6 +173,7 @@ def _selftest(workdir: str) -> int:
         gnotice = engine.geometry_notice_text([x for x in (g4, g5, g6) if x])
         ck("geometry_notice_wording",
            "目标要求：符合 4:3 的横版照片" in gnotice
+           and "仍会照常批量处理，无需手工调整或单独处理" in gnotice
            and all(n in gnotice for n in (p4.name, p5.name))
            and "不阻断导入" in gnotice, "")
 

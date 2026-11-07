@@ -82,17 +82,22 @@ ASPECT_TOLERANCE = 0.01                 # 宽高比相对容差 1%
 EXIF_TAG_ORIENTATION = 0x0112
 ORIENTATION_ROTATION = {6: "cw", 8: "ccw"}
 
-GEOMETRY_NOTICE_TITLE = "照片比例 / 方向检查"
-GEOMETRY_TARGET_LABEL = "目标要求：符合 4:3 的横版照片。"
+GEOMETRY_NOTICE_TITLE = "照片比例 / 方向提示"
+GEOMETRY_TARGET_LABEL = ("目标要求：符合 4:3 的横版照片；处理时自动居中裁边"
+                         "（横版左右各约 3.3%，不缩放、不重采样）。")
 GEOMETRY_ROTATION_TEXT = {
     # 带方向标记的照片引擎会自动按标记校正，须明确「无需手工旋转」以免重复旋转
-    "cw": "依据方向标记需顺时针旋转 90°；程序会自动校正，无需手工旋转",
-    "ccw": "依据方向标记需逆时针旋转 90°；程序会自动校正，无需手工旋转",
-    "manual": "旋转方向请人工确认，程序不指定方向",
+    "cw": "仍会照常处理；依据方向标记需顺时针旋转 90°，程序会自动校正，无需手工旋转",
+    "ccw": "仍会照常处理；依据方向标记需逆时针旋转 90°，程序会自动校正，无需手工旋转",
+    "manual": "仍会照常处理；如需 4:3 横版，旋转方向请人工确认，程序不指定方向",
 }
-GEOMETRY_RATIO_ADVICE = "仅旋转无法修正比例，请裁剪或更换为符合 4:3 的横版文件"
-GEOMETRY_UNREADABLE_ADVICE = "请确认文件可正常打开，或更换文件"
-GEOMETRY_NONBLOCKING_TEXT = "其余合格照片已正常导入，可继续批量处理；本提示不阻断导入。"
+# 横版比例不符：默认居中裁边即可达标，无需任何人工介入
+GEOMETRY_RATIO_ADVICE = "处理时自动居中裁边到 4:3，无需手工调整或单独处理"
+GEOMETRY_RATIO_ADVICE_NO_CROP = ("当前缩放方式不会裁成 4:3；仍会照常处理，"
+                                 "如需 4:3 请改回「居中裁边到 4:3」")
+GEOMETRY_RATIO_KEEP_ADVICE = "仍会照常处理（保持原样）；如需 4:3 横版，请裁剪或更换源图"
+GEOMETRY_UNREADABLE_ADVICE = "该文件无法处理，请确认可正常打开或更换文件"
+GEOMETRY_NONBLOCKING_TEXT = "上述照片均已导入，可直接开始批量处理；本提示不阻断导入。"
 
 
 @dataclass(frozen=True)
@@ -119,24 +124,44 @@ class GeometryIssue:
             "unreadable": "无法读取照片尺寸",
         }.get(self.kind, "比例或方向不符合要求")
 
-    @property
-    def advice(self) -> str:
+    def advice_for(self, auto_crop: bool = True) -> str:
+        """给出该张的处理说明。auto_crop=是否已启用「居中裁边到 4:3」（默认启用）。
+
+        横版比例不符时明确「自动裁边、无需人工」：既给出裁后尺寸与每侧像素数，
+        也点明无需手工调整或单独处理，避免被理解成需要操作人员先自行改图。
+        """
         if self.kind == "unreadable":
             return GEOMETRY_UNREADABLE_ADVICE
         if self.kind == "portrait_rotatable":
             return GEOMETRY_ROTATION_TEXT.get(self.rotation, GEOMETRY_ROTATION_TEXT["manual"])
-        return GEOMETRY_RATIO_ADVICE
+        if self.kind == "landscape_ratio":
+            if not auto_crop:
+                return GEOMETRY_RATIO_ADVICE_NO_CROP
+            tw = round(self.height * 4 / 3)
+            if self.width > self.height and tw < self.width:
+                side = (self.width - tw) // 2
+                return (f"处理时自动居中裁边为 {tw}×{self.height}"
+                        f"（左右各裁 {side} px），无需手工调整或单独处理")
+            return GEOMETRY_RATIO_ADVICE
+        return GEOMETRY_RATIO_KEEP_ADVICE
+
+    @property
+    def advice(self) -> str:
+        return self.advice_for(True)
+
+    def brief_for(self, auto_crop: bool = True) -> str:
+        return f"{self.anomaly}；{self.advice_for(auto_crop)}"
 
     @property
     def brief(self) -> str:
-        return f"{self.anomaly}；{self.advice}"
+        return self.brief_for(True)
 
     @property
     def rotation_reliable(self) -> bool:
         return self.rotation in ("cw", "ccw")
 
-    def as_lines(self, index: int) -> str:
-        return f"{index:>2}. {self.filename}\n     {self.anomaly} → {self.advice}"
+    def as_lines(self, index: int, auto_crop: bool = True) -> str:
+        return f"{index:>2}. {self.filename}\n     {self.anomaly} → {self.advice_for(auto_crop)}"
 
 
 @dataclass
@@ -290,7 +315,8 @@ def check_geometry(path: str | Path) -> GeometryIssue | None:
     - 横版且宽高比 4:3（±1%）→ 合格
     - 竖版且高宽比 4:3 → 旋转 90° 即可满足；方向仅在 EXIF Orientation 为 6/8
       时可靠给出，否则标记为需人工确认（不指定方向）
-    - 其余（比例不符的竖版 / 横版、正方形、无法读取）→ 仅旋转无法修正比例
+    - 其余（比例不符的竖版 / 横版、正方形、无法读取）→ 横版由默认裁剪自动处理，
+      竖版/正方形保持原样并提示；均不影响批量处理
     """
     p = Path(path)
     try:
@@ -313,11 +339,16 @@ def check_geometry(path: str | Path) -> GeometryIssue | None:
     return GeometryIssue(p.name, w, h, orientation, kind, "")
 
 
-def geometry_notice_text(issues: list[GeometryIssue]) -> str:
-    """提示窗口正文的唯一文案来源（GUI、测试、命令行自检共用）。"""
-    lines = [f"发现 {len(issues)} 张照片不符合导入要求。", GEOMETRY_TARGET_LABEL, ""]
+def geometry_notice_text(issues: list[GeometryIssue], crop43_enabled: bool = True) -> str:
+    """提示窗口正文的唯一文案来源（GUI、测试、命令行自检共用）。
+
+    首句即点明「仍会照常批量处理、无需手工调整或单独处理」，避免被读成需要人工先改图。
+    """
+    head = (f"以下 {len(issues)} 张照片不是 4:3 横版，仍会照常批量处理，"
+            "无需手工调整或单独处理。")
+    lines = [head, GEOMETRY_TARGET_LABEL, ""]
     for i, issue in enumerate(issues, 1):
-        lines.append(issue.as_lines(i))
+        lines.append(issue.as_lines(i, crop43_enabled))
     lines.extend(["", GEOMETRY_NONBLOCKING_TEXT])
     return "\n".join(lines)
 

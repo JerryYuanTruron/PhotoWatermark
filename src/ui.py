@@ -116,7 +116,8 @@ class MappedCombo(ttk.Combobox):
         self.set(self._fwd.get(value, value))
 
 
-def show_geometry_notice(parent: tk.Misc, issues: list[GeometryIssue]) -> tk.Toplevel:
+def show_geometry_notice(parent: tk.Misc, issues: list[GeometryIssue],
+                         crop43_enabled: bool = True) -> tk.Toplevel:
     """导入时的比例/方向提示窗口：非模态、可滚动，不阻断其余照片继续导入。
 
     正文由 engine.geometry_notice_text() 统一提供（GUI / 测试 / 自检共用同一文案）。
@@ -147,7 +148,7 @@ def show_geometry_notice(parent: tk.Misc, issues: list[GeometryIssue]) -> tk.Top
 
     head = tk.Frame(win, bg="#F5F7FA")
     head.pack(fill="x", padx=14, pady=(12, 2))
-    tk.Label(head, text=f"发现 {len(issues)} 张照片不符合导入要求",
+    tk.Label(head, text=f"发现 {len(issues)} 张照片不是 4:3 横版（仍会照常批量处理）",
              bg="#F5F7FA", fg="#A8410E",
              font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
 
@@ -160,7 +161,7 @@ def show_geometry_notice(parent: tk.Misc, issues: list[GeometryIssue]) -> tk.Top
     txt.configure(yscrollcommand=sb.set)
     sb.pack(side="right", fill="y")
     txt.pack(side="left", fill="both", expand=True)
-    txt.insert("1.0", geometry_notice_text(issues))
+    txt.insert("1.0", geometry_notice_text(issues, crop43_enabled))
     txt.configure(state="disabled")
 
     foot = tk.Frame(win, bg="#F5F7FA")
@@ -664,7 +665,7 @@ class App(tk.Tk):
         if bad:
             notes.append(f"{bad} 张缺少 EXIF 信息（已弹窗提示）")
         if geo_bad:
-            notes.append(f"{geo_bad} 张比例/方向不符合 4:3 横版（已弹窗列出）")
+            notes.append(f"{geo_bad} 张不是 4:3 横版（已弹窗说明，将自动裁边照常处理）")
         self._set_status(head + ((" 其中 " + "，".join(notes) + "。") if notes
                                  else " 全部通过 EXIF 与 4:3 横版检查。"))
         if added:
@@ -722,7 +723,8 @@ class App(tk.Tk):
             except tk.TclError:
                 pass
             self.geometry_window = None
-        self.geometry_window = show_geometry_notice(self, issues)
+        auto_crop = self._collect_config().resize_mode == "crop43"
+        self.geometry_window = show_geometry_notice(self, issues, auto_crop)
 
     def _clear_files(self) -> None:
         if self.busy:
@@ -751,13 +753,17 @@ class App(tk.Tk):
 
     def _rebuild_pending_rows(self) -> None:
         self.tree.delete(*self.tree.get_children())
+        # 比例/方向只是「处理方式的说明」，不是失败：状态列不写「异常」，也不占用失败阶段列
+        auto_crop = self._collect_config().resize_mode == "crop43"
         for i, p in enumerate(self.files, 1):
             exif_issue = self.precheck.get(p, "")
             geo_issue = self.geometry.get(p)
             if exif_issue:
                 status, stage, reason, tag = "缺少 EXIF", "EXIF 检查", exif_issue, "warn"
             elif geo_issue:
-                status, stage, reason, tag = "比例异常", "导入检查", geo_issue.brief, "warn"
+                status = ("自动裁边" if (auto_crop and geo_issue.kind == "landscape_ratio")
+                          else "比例提示")
+                status, stage, reason, tag = status, "", geo_issue.brief_for(auto_crop), "warn"
             else:
                 status, stage, reason, tag = "待处理", "", "", "pending"
             self.tree.insert("", "end", iid=str(i),
