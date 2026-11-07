@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import struct
 import sys
@@ -23,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src import __version__, config, engine, reporter  # noqa: E402
+from tests import _testfs as testfs  # noqa: E402
 from tests.make_samples import build  # noqa: E402
 
 PASS: list[str] = []
@@ -57,10 +59,8 @@ def run(files: list[Path], cfg: config.RuleConfig) -> list[engine.ProcessResult]
 
 
 def fresh(name: str) -> Path:
-    p = ROOT / "_test_runs" / name
-    shutil.rmtree(p, ignore_errors=True)
-    p.mkdir(parents=True)
-    return p
+    """本次运行专属的空目录（不删除任何已有文件，避免触发批量删除授权）。"""
+    return testfs.fresh_dir(ROOT / "_test_runs", name)
 
 
 def main() -> int:
@@ -80,9 +80,15 @@ def main() -> int:
     # ------------------------------------------------------------------
     print("\n[A] 规则配置")
     c = C()
-    check("A1 文档默认值", (c.target_width, c.target_height, c.dpi, c.font_size,
-                            c.position, c.time_format) ==
+    check("A1 文档默认值", (c.target_width, c.target_height, c.dpi,
+                            c.font_size, c.position, c.time_format) ==
           (2400, 1800, 300, 70, "bottom_right", "%Y/%m/%d %H:%M:%S"))
+    check("A1b 时间水印默认即系统固定规格（仅时间/固定格式/不可关闭）",
+          (c.time_format, c.content_template, c.watermark_enabled, c.time_source,
+           c.missing_exif_policy, c.position, c.font_family, c.font_size,
+           c.font_opacity) ==
+          ("%Y/%m/%d %H:%M:%S", "{time}", True, "exif", "fail",
+           "bottom_right", "微软雅黑", 70, 100), "")
     c.output_dir = str(ROOT / "_test_runs")
     check("A2 默认配置通过校验", c.validate() == [], str(c.validate()))
     c2 = config.RuleConfig.from_dict({"target_width": "1234", "dpi": None,
@@ -92,11 +98,23 @@ def main() -> int:
                                                     output_dir=str(ROOT / "_test_runs")).validate() != [])
     tmp_json = ROOT / "_test_runs" / "rule.json"
     c.save(tmp_json)
-    check("A5 规则文件 JSON 往返", config.RuleConfig.load(tmp_json).time_format == c.time_format)
+    check("A5 规则文件 JSON 往返", config.RuleConfig.load(tmp_json).target_width == c.target_width)
+    check("A5b 规则文件无法改写时间水印",
+          config.RuleConfig.from_dict({"time_format": "%Y-%m-%d",
+                                       "content_template": "{filename} {time}",
+                                       "watermark_enabled": False}).time_format
+          == config.WATERMARK_TIME_FORMAT
+          and config.RuleConfig.from_dict({"content_template": "{filename} {time}"}
+                                          ).content_template == "{time}", "")
     check("A6 pt 单位按 DPI 换算", C(font_size=72, font_size_unit="pt",
                                                     dpi=300).effective_font_px() == 300)
     check("A7 三套预置均可实例化且字段不同",
           len({config.preset_config(n).target_width for n in config.PRESETS}) >= 2)
+    check("A7b 预置方案不含水印项、无法改写水印",
+          all(not (set(p) & set(config.FIXED_WATERMARK_FIELDS))
+              for p in config.PRESETS.values())
+          and all(config.preset_config(n).time_format == config.WATERMARK_TIME_FORMAT
+                  for n in config.PRESETS), "")
 
     # ------------------------------------------------------------------
     print("\n[B] EXIF 拍摄日期（文档 3.6）")
@@ -149,36 +167,43 @@ def main() -> int:
     rs = run([good], cfg)
     r = rs[0]
     check("D1 水印文本为 年/月/日 时:分:秒", r.watermark_text == "2026/05/22 16:29:01")
-    check("D2 默认水印位于右下（含 24/20 px 安全边距）",
+    check("D2 水印固定位于右下（系统固定 24/20 px 安全边距）",
           r.watermark_rect is not None and r.watermark_rect[2] >= 2300
           and r.watermark_rect[3] >= 1700, str(r.watermark_rect))
-    for pos, where in (("top_left", "左上"), ("center", "正中"), ("bottom_left", "左下")):
-        cfg = C(output_dir=str(fresh("pos_" + pos)), position=pos)
-        rr = run([good], cfg)[0]
-        rect = rr.watermark_rect or (0, 0, 0, 0)
-        ok = ({"top_left": rect[0] < 50 and rect[1] < 50,
-               "center": abs(rect[0] + rect[2] - 2400) < 200,
-               "bottom_left": rect[0] < 50 and rect[3] > 1700}[pos])
-        check(f"D3 位置 {where} 生效", ok, str(rect))
-    cfg = C(output_dir=str(fresh("template")),
-                            content_template="{filename} | {seq} | {time}")
+    # 以下 D3–D8 断言「水印不可配置」：即便传入非固定值，也必须按系统规格出图
+    cfg = C(output_dir=str(fresh("pos_locked")), position="top_left")
     rr = run([good], cfg)[0]
-    check("D4 内容模板 token 替换",
-          rr.watermark_text == "PeCu_2718281828_0001 | 0001 | 2026/05/22 16:29:01",
-          rr.watermark_text)
+    rect = rr.watermark_rect or (0, 0, 0, 0)
+    check("D3 位置不可配置：传入「左上」仍固定右下",
+          rect[0] > 1500 and rect[3] > 1700 and cfg.position == "bottom_right",
+          f"{rect} / {cfg.position}")
+    cfg = C(output_dir=str(fresh("template")),
+            content_template="{filename} | {seq} | {time}")
+    rr = run([good], cfg)[0]
+    check("D4 内容不可配置：模板含文件名/序号也被强制为仅时间",
+          rr.watermark_text == "2026/05/22 16:29:01", rr.watermark_text)
     cfg = C(output_dir=str(fresh("dashfmt")), time_format="%Y-%m-%d %H:%M:%S")
-    check("D5 时间格式可改", run([good], cfg)[0].watermark_text == "2026-05-22 16:29:01")
+    check("D5 格式不可配置：改格式仍为 yyyy/mm/dd hh:mm:ss",
+          run([good], cfg)[0].watermark_text == "2026/05/22 16:29:01")
     cfg = C(output_dir=str(fresh("nosha")), shadow_enabled=False,
-                            font_family="黑体", font_size=120)
-    check("D6 字体/阴影/字号可改且仍成功", run([good], cfg)[0].ok)
+            font_family="黑体", font_size=120)
+    rr = run([good], cfg)[0]
+    check("D6 字体/阴影/字号不可配置：仍按系统固定规格成功出图",
+          rr.ok and cfg.font_family == "微软雅黑" and cfg.font_size == 70
+          and cfg.shadow_enabled is True,
+          f"{cfg.font_family}/{cfg.font_size}/{cfg.shadow_enabled}")
     cfg = C(output_dir=str(fresh("longfmt")), font_size=500,
-                            time_format="拍摄时间 %Y年%m月%d日 %H时%M分%S秒 样品编号ABCDEF")
-    rr = run([tiny], cfg)[0]
-    check("D7 超宽时间戳自动缩字号不截断",
-          rr.ok and any("自动缩小" in w for w in rr.warnings), str(rr.warnings))
+            time_format="拍摄时间 %Y年%m月%d日 %H时%M分%S秒 样品编号ABCDEF")
+    rr = run([good], cfg)[0]
+    check("D7 水印恒为 19 字符时间戳，不存在自定义长文本",
+          rr.ok and len(rr.watermark_text) == 19
+          and bool(re.fullmatch(r"\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}", rr.watermark_text)),
+          rr.watermark_text)
     cfg = C(output_dir=str(fresh("no_wm")), watermark_enabled=False)
     rr = run([noexif], cfg)[0]
-    check("D8 关闭水印后无 EXIF 照片也可正常输出", rr.ok and rr.watermark_text == "")
+    check("D8 水印不可关闭：关闭后缺 EXIF 仍判失败",
+          rr.status == engine.STATUS_FAILED and cfg.watermark_enabled is True,
+          f"{rr.status} {cfg.watermark_enabled}")
 
     # ------------------------------------------------------------------
     print("\n[E] 失败识别、策略与清理")
@@ -202,30 +227,32 @@ def main() -> int:
     check("E7 输出目录只含合格成品",
           len(list(base.iterdir())) == 1, str([p.name for p in base.iterdir()]))
 
-    cfg = C(output_dir=str(fresh("policy_use_file_mtime")),
-                            missing_exif_policy="use_file_mtime")
+    cfg = C(output_dir=str(fresh("policy_locked")), missing_exif_policy="use_file_mtime")
     rr = run([noexif], cfg)[0]
-    check("E8 EXIF缺失策略 use_file_mtime → 警告且说明非拍摄日期",
-          rr.status == engine.STATUS_WARNING and any("非 EXIF 拍摄日期" in w for w in rr.warnings),
-          f"{rr.status} {rr.warnings}")
-    cfg = C(output_dir=str(fresh("policy_no_watermark")),
-                            missing_exif_policy="no_watermark")
+    check("E8 缺 EXIF 策略不可配置：改为回退文件时间仍判失败",
+          rr.status == engine.STATUS_FAILED and cfg.missing_exif_policy == "fail",
+          f"{rr.status} {cfg.missing_exif_policy}")
+    cfg = C(output_dir=str(fresh("policy_locked2")), missing_exif_policy="no_watermark")
     rr = run([noexif], cfg)[0]
-    check("E8b EXIF缺失策略 no_watermark → 判失败（成品无时间戳不可交付）",
-          rr.status == engine.STATUS_FAILED and "不含可见时间戳" in rr.reason,
-          f"{rr.status} {rr.reason}")
+    check("E8b 缺 EXIF 策略不可配置：跳过水印也被强制为判失败",
+          rr.status == engine.STATUS_FAILED, f"{rr.status} {rr.reason[:60]}")
 
     cfg = C(output_dir=str(fresh("mtime")), time_source="file_mtime")
     rr = run([noexif], cfg)[0]
-    check("E9 时间来源改为文件修改时间可用且有告警", rr.ok and rr.warnings)
+    check("E9 时间来源不可配置：改文件修改时间仍按 EXIF 判失败",
+          rr.status == engine.STATUS_FAILED and cfg.time_source == "exif",
+          f"{rr.status} {cfg.time_source}")
     cfg = C(output_dir=str(fresh("fixed")), time_source="fixed",
-                            fixed_time_text="2026/11/07 12:00:00")
-    check("E10 固定文本内容生效",
-          run([noexif], cfg)[0].watermark_text == "2026/11/07 12:00:00")
+            fixed_time_text="2026/11/07 12:00:00")
+    rr = run([noexif], cfg)[0]
+    check("E10 固定文本不可用：不会以固定文本替代真实拍摄时间",
+          rr.status == engine.STATUS_FAILED and rr.watermark_text == "",
+          f"{rr.status} {rr.watermark_text!r}")
     cfg = C(output_dir=str(fresh("badfont")), font_path=r"Z:\nonexistent\font.ttf",
-                            font_family="不存在字体")
+            font_family="不存在字体")
     rr = run([good], cfg)[0]
-    check("E11 字体不存在时回退到系统字体而非整批失败", rr.ok, str(rr.reason))
+    check("E11 自定义字体不可配置：仍用系统固定字体成功输出",
+          rr.ok and cfg.font_path == "" and cfg.font_family == "微软雅黑", str(rr.reason))
 
     # 模拟输出校验失败，验证残留成品被清理
     cfg = C(output_dir=str(fresh("verify_fail")))
@@ -305,10 +332,9 @@ def main() -> int:
     cfg = C(output_dir=str(fresh("zero_opacity")), font_opacity=0,
                             shadow_opacity=0)
     rr = run([good], cfg)[0]
-    check("H1 全透明水印被渲染自检拦截并判失败",
-          rr.status == engine.STATUS_FAILED and rr.stage == engine.STAGE_WATERMARK
-          and ("水印图层为空" in rr.reason or "字体不透明度" in rr.reason),
-          f"{rr.status} {rr.reason}")
+    check("H1 不透明度不可配置：设为 0 仍按系统 100% 渲染成功",
+          rr.ok and cfg.font_opacity == 100 and bool(rr.watermark_text),
+          f"{rr.status} {cfg.font_opacity} {rr.watermark_text}")
     cfg = C(output_dir=str(fresh("tiny_canvas")), target_width=32,
                             target_height=24, font_size=500)
     rr = run([good], cfg)[0]
@@ -316,10 +342,12 @@ def main() -> int:
           rr.status in (engine.STATUS_SUCCESS, engine.STATUS_FAILED, engine.STATUS_WARNING),
           f"{rr.status} {rr.reason}")
     bad_cfg = C(output_dir=str(fresh("badformat")), time_format="%Q-%Z")
-    check("H3 非法时间格式指令被配置校验拦截",
-          any("时间格式" in e for e in bad_cfg.validate()), str(bad_cfg.validate()))
     rr = run([good], bad_cfg)[0]
-    check("H3b 非法时间格式也不导致程序崩溃", isinstance(rr.status, str))
+    check("H3 时间格式固定：非法指令既不生效也不影响处理",
+          rr.ok and rr.watermark_text == "2026/05/22 16:29:01"
+          and bad_cfg.validate() == [], f"{rr.status} {rr.watermark_text}")
+    check("H3b 水印字段自定义被配置校验拦截",
+          any("不可自定义" in e for e in C(time_format="%Q-%Z").validate()), "")
     src_copy_dir = fresh("out_equals_src")
     src_copy = src_copy_dir / "sample.jpg"
     shutil.copy2(good, src_copy)
@@ -336,17 +364,18 @@ def main() -> int:
     cfg = C(output_dir=str(fresh("invisible")), font_opacity=0,
                             shadow_opacity=70)
     rr = run([good], cfg)[0]
-    check("I1 文字全透明+有阴影 不再判成功",
-          rr.status == engine.STATUS_FAILED, f"{rr.status} {rr.reason}")
-    check("I1b 配置校验拦截 font_opacity=0",
-          any("字体不透明度" in e for e in cfg.validate()), str(cfg.validate()))
+    check("I1 不透明度不可配置：水印恒为可见，不会出现全透明水印",
+          rr.ok and cfg.font_opacity == 100, f"{rr.status} {cfg.font_opacity}")
+    check("I1b 配置校验拦截水印字段自定义",
+          any("不可自定义" in e for e in C(font_opacity=0).validate()),
+          str(C(font_opacity=0).validate()))
     cfg = C(output_dir=str(fresh("no_token")), content_template="PHOTO OK")
     rr = run([good], cfg)[0]
-    check("I2 水印模板不含 {time} 被拦截",
-          rr.status == engine.STATUS_FAILED and "不含时间戳" in rr.reason,
-          f"{rr.status} {rr.reason}")
-    check("I2b 配置校验拦截缺失 {time}",
-          any("{time}" in e for e in cfg.validate()), str(cfg.validate()))
+    check("I2 水印模板不可配置：无 {time} 的模板被强制为仅时间",
+          rr.ok and rr.watermark_text == "2026/05/22 16:29:01", rr.watermark_text)
+    check("I2b 配置校验拦截水印模板自定义",
+          any("不可自定义" in e for e in C(content_template="PHOTO OK").validate()),
+          str(C(content_template="PHOTO OK").validate()))
     dt3, tag3, note3 = engine.read_exif_datetime_ex(
         Image.open(by_name["PeCu_2718281828_0002.jpg"]).getexif())
     check("I3 回退到 DateTime 时显式报告偏差",
@@ -357,11 +386,10 @@ def main() -> int:
           rr.status == engine.STATUS_WARNING and any("非 EXIF 拍摄日期" in w for w in rr.warnings),
           f"{rr.status} {rr.warnings}")
     cfg = C(output_dir=str(fresh("fixed_note")), time_source="fixed",
-                            fixed_time_text="2026/11/07 12:00:00")
+            fixed_time_text="2026/11/07 12:00:00")
     rr = run([good], cfg)[0]
-    check("I3c 固定文本也降级为警告",
-          rr.status == engine.STATUS_WARNING and any("非 EXIF 拍摄日期" in w for w in rr.warnings),
-          f"{rr.status} {rr.warnings}")
+    check("I3c 固定文本不可用：水印仍取 EXIF 拍摄时间",
+          rr.watermark_text == "2026/05/22 16:29:01", rr.watermark_text)
 
     # H2：输出目录 = 源目录，且输出名与「另一张待处理源」同名
     coll = fresh("collision")

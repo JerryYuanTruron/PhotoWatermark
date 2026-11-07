@@ -147,7 +147,8 @@ def main() -> int:
             ck(f"2.5 冻结链路 / {name}", item.get("ok") is True, item.get("detail"))
         ck("2.6 无自检错误", data.get("ok") is True and not data.get("errors"),
            data.get("errors"))
-        for marker in ("guard_invisible_watermark", "guard_missing_time_token",
+        for marker in ("guard_watermark_not_configurable", "watermark_fixed_spec",
+                       "watermark_content_locked", "watermark_only_time_text",
                        "exif_diagnostics", "no_temp_residue", "attempted_output_recorded",
                        "compliant_naming_template", "guard_pixel_spec",
                        "guard_naming_required", "strict_exif_policy",

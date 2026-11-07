@@ -19,7 +19,8 @@ sys.path.insert(0, str(ROOT))
 
 import src.ui as ui  # noqa: E402
 from src import config, engine, reporter  # noqa: E402
-from src.ui import FIELD_GROUPS, App  # noqa: E402
+from src.ui import App  # noqa: E402
+from tests import _testfs as testfs  # noqa: E402
 from tests.make_samples import build  # noqa: E402
 
 
@@ -42,37 +43,59 @@ def main() -> int:
     ui.show_geometry_notice = lambda parent, issues: (
         GEOMETRY_CALLS.append(list(issues)) or None)
 
-    out = ROOT / "_test_out_ui"
-    shutil.rmtree(out, ignore_errors=True)
+    # 每次运行用唯一空目录，不做批量删除（避免触发删除授权，详见 tests/_testfs.py）
+    out = testfs.fresh_dir(ROOT / "_test_out_ui", "ui")
     samples = build(ROOT / "_test_samples")
 
     app = App()
     app.update()
-    ui_keys = {k for _, specs, _ in FIELD_GROUPS for k, *_ in specs}
+    ui_keys = set(ui.UI_FIELDS)
     cfg_keys = set(config.RuleConfig.__dataclass_fields__)
-    assert ui_keys == cfg_keys, f"界面与配置字段不一致: {ui_keys ^ cfg_keys}"
-    print("[1] 窗口构建成功；界面字段 =", len(ui_keys), "与 RuleConfig 一一对应")
+    fixed = set(config.FIXED_WATERMARK_FIELDS)
+    assert ui_keys == cfg_keys - fixed, f"界面与配置字段不一致: {ui_keys ^ (cfg_keys - fixed)}"
+    assert not (ui_keys & fixed), f"水印字段不得出现在界面: {ui_keys & fixed}"
+    print("[1] 窗口构建成功；界面字段 =", len(ui_keys),
+          "= 配置字段 −", len(fixed), "项系统固定水印字段")
 
-    # 配置往返
+    # 归一化默认值，避免受上次运行遗留配置影响
+    app._apply_config(config.RuleConfig())
+    app.vars["output_dir"].set(str(out))
+
+    # 配置往返（只涉及非水印项；水印恒为系统固定值）
     c0 = app._collect_config()
-    assert c0.target_width == 2400 and c0.font_family == "微软雅黑" and c0.position == "bottom_right"
-    c1 = config.RuleConfig(target_width=1234, font_size=99, position="top_left", dpi=200)
+    assert c0.target_width == 5292 and c0.resize_mode == "none"
+    assert (c0.time_format, c0.content_template, c0.font_size, c0.position) == (
+        config.WATERMARK_TIME_FORMAT, "{time}", 70, "bottom_right")
+    c1 = config.RuleConfig(target_width=1234, dpi=200, jpeg_quality=88,
+                           on_exists="rename", output_dir=str(out))
     app._apply_config(c1)
     c2 = app._collect_config()
-    assert c2.target_width == 1234 and c2.font_size == 99 and c2.position == "top_left" and c2.dpi == 200
-    print("[2] 规则配置界面↔RuleConfig 往返一致")
+    assert (c2.target_width, c2.dpi, c2.jpeg_quality, c2.on_exists) == (1234, 200, 88, "rename")
+    print("[2] 高级设置界面↔RuleConfig 往返一致；水印始终为系统固定值")
 
-    # 恢复默认 + 应用预置（不应清空输出目录）
-    app._restore_default()
+    # 必填项前置与门禁：未填满时禁用「开始批量处理」
+    app.vars["ecu_name"].set("")
+    app.vars["serial_number"].set("")
+    app.update()
+    assert app.required_filled == 1 and str(app.btn_start["state"]) == "disabled"
+    assert "1/3" in app.required_label["text"]
+    app.vars["ecu_name"].set("EEPH")
+    app.update()
+    assert app.required_filled == 2 and str(app.btn_start["state"]) == "disabled"
+    app.vars["serial_number"].set("TESTSERIAL")
+    app.update()
+    assert app.required_filled == 3 and str(app.btn_start["state"]) == "normal"
+    print("[2b] 必填项集中前置：未填满 3 项时禁用「开始批量处理」")
+
+    # 恢复默认只作用于高级设置，必填信息与输出目录保持不变
+    app.vars["jpeg_quality"].set("70")
+    app._restore_advanced_defaults()
     d = app._collect_config()
-    assert (d.target_width == 5292 and d.font_size == 70
-            and d.resize_mode == "none" and d.min_output_megapixels == 21
+    assert (d.target_width == 5292 and d.resize_mode == "none"
+            and d.min_output_megapixels == 21 and d.jpeg_quality == 92
             and d.filename_template == "{ecu}_{serial}_{seq}")
-    app.vars["output_dir"].set(str(out))
-    app._apply_preset()
-    d = app._collect_config()
-    assert d.output_dir == str(out), "应用预置不应清空输出目录"
-    print("[3] 恢复默认 / 应用预置正常，输出目录保持不变")
+    assert d.output_dir == str(out) and d.ecu_name == "EEPH"
+    print("[3] 恢复默认只作用于高级设置，必填信息与输出目录保持不变")
 
     # 切回合成小图的测试基线（v1.1.0 默认是不缩放 + ≥21MP + 合规命名）
     app.vars["ecu_name"].set("EEPH")
@@ -156,8 +179,7 @@ def main() -> int:
 
     # --- [10] 导入阶段比例/方向校验：非阻断、列出文件与异常类型、方向不擅自指定 ---
     geo_dir = out / "geo_samples"
-    shutil.rmtree(geo_dir, ignore_errors=True)
-    geo_dir.mkdir(parents=True)
+    geo_dir.mkdir(parents=True, exist_ok=True)
 
     def geo_sample(name: str, w: int, h: int) -> Path:
         p = geo_dir / name

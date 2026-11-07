@@ -53,12 +53,16 @@ def main() -> int:
         stamp = time.strftime("%Y%m%d_%H%M%S")
         EXE.rename(dist / f"PhotoWatermark_prev_{stamp}.exe")
 
+    # 每次构建使用独立的中间目录：PyInstaller --noconfirm 会清空 workpath，
+    # 复用 build/ 等于每轮批量删除数百个中间文件（运行环境对此需要人工授权）。
+    # 独立目录既避免批量删除，也天然保留上一次构建的中间物便于排查。
+    workpath = ROOT / "build" / f"w_{time.strftime('%Y%m%d_%H%M%S')}"
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--onefile", "--windowed",
         "--name", "PhotoWatermark",
         "--distpath", str(dist),
-        "--workpath", str(ROOT / "build"),
+        "--workpath", str(workpath),
         "--specpath", str(ROOT),
         "--hidden-import", "PIL",
         "--collect-submodules", "src",
