@@ -455,7 +455,7 @@ def main() -> int:
     print("\n[J] v1.1.0 客户合规口径（V1 p.3 / V2 §8·§10·§11）")
     d = config.RuleConfig()
     check("J1 程序默认即为合规口径",
-          d.resize_mode == "none" and d.min_output_megapixels == 21
+          d.resize_mode == "crop43" and d.min_output_megapixels == 21
           and d.filename_template == "{ecu}_{serial}_{seq}"
           and d.time_source == "exif" and d.missing_exif_policy == "fail"
           and d.ecu_name == "" and d.serial_number == "",
@@ -672,6 +672,61 @@ def main() -> int:
     check("L6 显式选择跳过时第二轮判跳过且不新增文件",
           s2.status == engine.STATUS_SKIPPED and len(list(sk.glob("*.jpg"))) == 1,
           f"{s2.status} {[p.name for p in sk.glob('*.jpg')]}")
+
+    # ------------------------------------------------------------------
+    print("\n[M] 默认「居中裁边到 4:3」（不缩放、不重采样）")
+    check("M1 默认缩放方式为 crop43",
+          config.RuleConfig().resize_mode == "crop43"
+          and next(iter(config.RESIZE_MODES)) == "crop43",
+          config.RuleConfig().resize_mode)
+    crop_dir = fresh("crop43")
+
+    def crop_img(name: str, w: int, h: int) -> Path:
+        p = crop_dir / name
+        ex = Image.Exif()
+        ex.get_ifd(0x8769)[36867] = "2026:05:22 16:29:01"
+        Image.new("RGB", (w, h), (70, 100, 140)).save(p, quality=90, exif=ex.tobytes())
+        return p
+
+    big = crop_img("REAL_8768.jpg", 8768, 6144)
+    r1 = run([big], C(output_dir=str(fresh("crop43_real")), resize_mode="crop43"))[0]
+    with Image.open(r1.output_path) as _im:
+        s1 = _im.size
+    check("M2 真实规格 8768×6144 居中裁为 8192×6144（4:3）",
+          r1.ok and s1 == (8192, 6144)
+          and any("左右各裁 288" in w for w in r1.warnings),
+          f"{s1} {r1.warnings}")
+    check("M3 裁边后像素数仍达标（≥21 MP）",
+          r1.output_megapixels >= 21, f"{r1.output_megapixels:.2f} MP")
+
+    r2 = run([crop_img("WIDE_16x9.jpg", 1920, 1080)],
+             C(output_dir=str(fresh("crop43_169")), resize_mode="crop43"))[0]
+    with Image.open(r2.output_path) as _im:
+        s2 = _im.size
+    check("M4 16:9 横版裁左右到 4:3（1440×1080）", r2.ok and s2 == (1440, 1080), str(s2))
+
+    r3 = run([crop_img("TALL_5x4.jpg", 1600, 1280)],
+             C(output_dir=str(fresh("crop43_54")), resize_mode="crop43"))[0]
+    with Image.open(r3.output_path) as _im:
+        s3 = _im.size
+    check("M5 5:4 横版裁上下到 4:3（1600×1200）", r3.ok and s3 == (1600, 1200), str(s3))
+
+    r4 = run([crop_img("ALREADY_43.jpg", 1200, 900)],
+             C(output_dir=str(fresh("crop43_noop")), resize_mode="crop43"))[0]
+    with Image.open(r4.output_path) as _im:
+        s4 = _im.size
+    check("M6 已是 4:3 的横版不再裁切、也不记裁切说明",
+          r4.ok and s4 == (1200, 900)
+          and not any("裁边" in w for w in r4.warnings), str(s4))
+
+    r5 = run([crop_img("VERT_3x4.jpg", 900, 1200)],
+             C(output_dir=str(fresh("crop43_vert")), resize_mode="crop43"))[0]
+    with Image.open(r5.output_path) as _im:
+        s5 = _im.size
+    check("M7 竖版不做破坏性裁切，给警告并降级",
+          r5.status == engine.STATUS_WARNING and s5 == (900, 1200)
+          and any("无法仅靠裁边" in w for w in r5.warnings),
+          f"{r5.status} {s5} {r5.warnings}")
 
     # ------------------------------------------------------------------
     print("\n" + "=" * 68)

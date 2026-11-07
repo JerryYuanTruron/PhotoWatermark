@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import time
@@ -51,6 +52,9 @@ def main() -> int:
 
     # 每次运行用唯一空目录，不做批量删除（避免触发删除授权，详见 tests/_testfs.py）
     out = testfs.fresh_dir(ROOT / "_test_out_ui", "ui")
+    # 关键：把「上次配置」持久化目录指向测试专用目录，
+    # 否则本测试写回的 resize_mode/min_output_megapixels 会污染真实启动配置（C1）
+    os.environ["PW_RULES_DIR"] = str(testfs.fresh_dir(ROOT / "_test_rules", "ui"))
     samples = build(ROOT / "_test_samples")
 
     app = App()
@@ -60,6 +64,8 @@ def main() -> int:
     fixed = set(config.FIXED_WATERMARK_FIELDS)
     assert ui_keys == cfg_keys - fixed, f"界面与配置字段不一致: {ui_keys ^ (cfg_keys - fixed)}"
     assert not (ui_keys & fixed), f"水印字段不得出现在界面: {ui_keys & fixed}"
+    assert "_test_rules" in str(config.rules_dir()), \
+        f"测试必须使用独立规则目录，避免污染真实启动配置: {config.rules_dir()}"
     print("[1] 窗口构建成功；界面字段 =", len(ui_keys),
           "= 配置字段 −", len(fixed), "项系统固定水印字段")
 
@@ -69,7 +75,7 @@ def main() -> int:
 
     # 配置往返（只涉及非水印项；水印恒为系统固定值）
     c0 = app._collect_config()
-    assert c0.target_width == 5292 and c0.resize_mode == "none"
+    assert c0.target_width == 5292 and c0.resize_mode == "crop43"
     assert (c0.time_format, c0.content_template, c0.font_size, c0.position) == (
         config.WATERMARK_TIME_FORMAT, "{time}", 70, "bottom_right")
     c1 = config.RuleConfig(target_width=1234, dpi=200, jpeg_quality=88,
@@ -97,7 +103,7 @@ def main() -> int:
     app.vars["jpeg_quality"].set("70")
     app._restore_advanced_defaults()
     d = app._collect_config()
-    assert (d.target_width == 5292 and d.resize_mode == "none"
+    assert (d.target_width == 5292 and d.resize_mode == "crop43"
             and d.min_output_megapixels == 21 and d.jpeg_quality == 92
             and d.filename_template == "{ecu}_{serial}_{seq}")
     assert d.output_dir == str(out) and d.ecu_name == "EEPH"
