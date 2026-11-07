@@ -516,6 +516,97 @@ def main() -> int:
           rrc.watermark_text)
 
     # ------------------------------------------------------------------
+    print("\n[K] 导入阶段：4:3 横版比例与方向校验")
+    gd = fresh("geometry")
+
+    def geo_img(name: str, w: int, h: int, ori: int | None = None) -> Path:
+        p = gd / name
+        ex = Image.Exif()
+        ex.get_ifd(0x8769)[36867] = "2026:11:05 16:08:32"
+        if ori is not None:
+            ex[0x0112] = ori
+        Image.new("RGB", (w, h), (90, 110, 130)).save(p, quality=90, exif=ex.tobytes())
+        return p
+
+    ok43 = [geo_img("OK_1200.jpg", 1200, 900), geo_img("OK_BIG.jpg", 8192, 6144),
+            geo_img("OK_5292.jpg", 5292, 3969)]
+    check("K1 4:3 横版（含大图）判定合格",
+          all(engine.check_geometry(p) is None for p in ok43), "")
+
+    pm = geo_img("P_MANUAL.jpg", 900, 1200)
+    gm = engine.check_geometry(pm)
+    check("K2 竖版 3:4 判定为旋转可修正",
+          gm is not None and gm.kind == "portrait_rotatable", str(gm))
+    check("K3 无可靠方向依据时要求人工确认且不指定方向",
+          gm is not None and gm.rotation == "manual"
+          and "人工确认" in gm.advice and "不指定方向" in gm.advice
+          and "顺时针" not in gm.advice and "逆时针" not in gm.advice,
+          gm.advice if gm else "")
+
+    gcw = engine.check_geometry(geo_img("P_CW.jpg", 900, 1200, 6))
+    gccw = engine.check_geometry(geo_img("P_CCW.jpg", 900, 1200, 8))
+    check("K4 EXIF 方向 6 → 顺时针建议且注明程序自动校正",
+          gcw is not None and gcw.rotation_reliable and gcw.rotation == "cw"
+          and "顺时针" in gcw.advice and "无需手工旋转" in gcw.advice,
+          gcw.advice if gcw else "")
+    check("K5 EXIF 方向 8 → 逆时针建议且注明程序自动校正",
+          gccw is not None and gccw.rotation_reliable and gccw.rotation == "ccw"
+          and "逆时针" in gccw.advice and "无需手工旋转" in gccw.advice,
+          gccw.advice if gccw else "")
+    other_ori = [engine.check_geometry(geo_img(f"P_O{x}.jpg", 900, 1200, x))
+                 for x in (0, 1, 2, 3, 4, 5, 7)]
+    check("K6 其余方向标记一律不擅自指定方向",
+          all(g is not None and g.rotation == "manual" for g in other_ori), "")
+
+    ratio_cases = [
+        ("K7 竖版且比例不符", geo_img("P_BAD.jpg", 900, 1600), "portrait_ratio"),
+        ("K8 横版但比例不符", geo_img("L_BAD.jpg", 1600, 900), "landscape_ratio"),
+        ("K9 正方形比例不符", geo_img("S_BAD.jpg", 1000, 1000), "square"),
+        ("K9b 真实规格 8768×6144 判为横版比例不符",
+         geo_img("REAL.jpg", 8768, 6144), "landscape_ratio"),
+    ]
+    ratio_issues = []
+    for label, path, kind in ratio_cases:
+        g = engine.check_geometry(path)
+        ratio_issues.append(g)
+        check(label + "：仅旋转无法修正并提示裁剪/更换",
+              g is not None and g.kind == kind
+              and all(w in g.advice for w in ("仅旋转无法修正比例", "裁剪", "更换", "4:3")),
+              g.brief if g else "")
+
+    broken_geo = gd / "BROKEN.jpg"
+    broken_geo.write_bytes(b"\xff\xd8\xff\xe0" + b"garbage" * 20)
+    gbr = engine.check_geometry(broken_geo)
+    check("K10 无法读取尺寸的文件单独标记，不误报为竖版",
+          gbr is not None and gbr.kind == "unreadable"
+          and "竖版" not in gbr.anomaly, gbr.brief if gbr else "")
+
+    notice = engine.geometry_notice_text([x for x in [gm, gcw, gccw] + ratio_issues + [gbr] if x])
+    check("K11 提示正文列出受影响文件、异常类型、目标要求与非阻断说明",
+          all(n in notice for n in (pm.name, "P_CW.jpg", "L_BAD.jpg", "BROKEN.jpg"))
+          and "竖版" in notice and "横版" in notice
+          and "目标要求：符合 4:3 的横版照片" in notice
+          and "不阻断导入" in notice, "")
+    banned_geo = ("微信", "截图", "传输", "APP1", "剥离", "来源", "推断", "诊断")
+    check("K12 提示文案纯净、简洁、无来源类信息",
+          all(w not in notice for w in banned_geo)
+          and "程序不指定方向" in notice and "仅旋转无法修正比例" in notice, "")
+    # 文件名不得影响判定（防止用文件名或来源类信息替代像素尺寸判断）
+    check("K13 判定只依据像素尺寸，不依据文件名",
+          engine.check_geometry(geo_img("名为竖版实则横版.jpg", 1200, 900)) is None
+          and engine.check_geometry(geo_img("名为横版实则竖版.jpg", 900, 1200)) is not None, "")
+    cfg_ori = C(output_dir=str(fresh("geo_orient_out")), resize_mode="none",
+                min_output_megapixels=0)
+    ro = run([geo_img("P_CW_PROCESS.jpg", 900, 1200, 6)], cfg_ori)[0]
+    if ro.ok and ro.output_path and Path(ro.output_path).is_file():
+        with Image.open(ro.output_path) as oim:
+            actual = oim.size
+    else:
+        actual = ()
+    check("K14 措辞属实：方向标记在引擎中自动校正为 4:3 横版",
+          ro.ok and actual == (1200, 900), f"{ro.status} {actual} {ro.reason[:60]}")
+
+    # ------------------------------------------------------------------
     print("\n" + "=" * 68)
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
     for f in FAIL:

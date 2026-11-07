@@ -152,7 +152,10 @@ def main() -> int:
                        "compliant_naming_template", "guard_pixel_spec",
                        "guard_naming_required", "strict_exif_policy",
                        "compliant_output_name", "exif_only_trigger", "notice_clean",
-                       "no_source_diagnostics", "precheck_uses_uniform_text"):
+                       "no_source_diagnostics", "precheck_uses_uniform_text",
+                       "geometry_check_available", "geometry_compliant",
+                       "geometry_portrait_manual", "geometry_ratio_advice",
+                       "geometry_direction_reliable", "geometry_notice_wording"):
             item = (data.get("checks") or {}).get(marker, {})
             ck(f"2.7 产物含本版行为标记 / {marker}", item.get("ok") is True,
                item.get("detail", "缺失"))

@@ -8,18 +8,24 @@ from __future__ import annotations
 import shutil
 import sys
 import time
+import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox
+
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import src.ui as ui  # noqa: E402
 from src import config, engine, reporter  # noqa: E402
 from src.ui import FIELD_GROUPS, App  # noqa: E402
 from tests.make_samples import build  # noqa: E402
 
 
 POPUPS: list[tuple[str, str, str]] = []
+GEOMETRY_CALLS: list[list[engine.GeometryIssue]] = []
+REAL_SHOW_GEOMETRY = ui.show_geometry_notice
 
 
 def main() -> int:
@@ -32,6 +38,9 @@ def main() -> int:
     for name in ("showinfo", "showwarning", "showerror"):
         setattr(messagebox, name, record(name))
     messagebox.askyesno = lambda *a, **k: True  # type: ignore[assignment]
+    # 记录比例/方向提示窗口的调用（不真正弹窗，便于无人值守断言）
+    ui.show_geometry_notice = lambda parent, issues: (
+        GEOMETRY_CALLS.append(list(issues)) or None)
 
     out = ROOT / "_test_out_ui"
     shutil.rmtree(out, ignore_errors=True)
@@ -144,6 +153,84 @@ def main() -> int:
     assert "NOEXIF_0004.jpg" in csv_text and "BROKEN_0005.jpg" in csv_text
     assert "缺少 EXIF 信息" in csv_text
     print("[9] 失败清单含失败文件名与具体原因")
+
+    # --- [10] 导入阶段比例/方向校验：非阻断、列出文件与异常类型、方向不擅自指定 ---
+    geo_dir = out / "geo_samples"
+    shutil.rmtree(geo_dir, ignore_errors=True)
+    geo_dir.mkdir(parents=True)
+
+    def geo_sample(name: str, w: int, h: int) -> Path:
+        p = geo_dir / name
+        ex = Image.Exif()
+        ex.get_ifd(0x8769)[36867] = "2026:11:05 16:08:32"
+        Image.new("RGB", (w, h), (90, 110, 130)).save(p, quality=90, exif=ex.tobytes())
+        return p
+
+    ok43 = geo_sample("OK_43.jpg", 1200, 900)
+    vert = geo_sample("VERT_34.jpg", 900, 1200)
+    wide = geo_sample("WIDE_169.jpg", 1600, 900)
+    app._clear_files()
+    GEOMETRY_CALLS.clear()
+    POPUPS.clear()
+    app._merge_files([str(ok43)])
+    app.update()
+    assert not GEOMETRY_CALLS, f"4:3 横版不应弹窗：{GEOMETRY_CALLS}"
+    print("[10a] 仅 4:3 横版照片导入不触发比例/方向提示")
+
+    app._merge_files([str(vert), str(wide)])
+    app.update()
+    assert len(GEOMETRY_CALLS) == 1, f"应弹出一次提示：{GEOMETRY_CALLS}"
+    issues = GEOMETRY_CALLS[-1]
+    text = engine.geometry_notice_text(issues)
+    assert len(issues) == 2 and all(x.filename in text for x in issues)
+    assert "目标要求：符合 4:3 的横版照片" in text
+    assert "竖版" in text and "横版" in text
+    assert "程序不指定方向" in text and "人工确认" in text
+    assert "仅旋转无法修正比例" in text and "裁剪或更换" in text
+    assert "不阻断导入" in text
+    assert len(app.files) == 3 and ok43.name in [Path(f).name for f in app.files]
+    statuses = [app.tree.item(str(i), "values")[3] for i in range(1, 4)]
+    assert statuses == ["待处理", "比例异常", "比例异常"], statuses
+    print("[10b] 提示列出受影响文件 / 异常类型 / 目标要求；合格照片仍照常导入")
+
+    # 重复导入不重复弹窗；清空后重新导入会再次提示
+    app._merge_files([str(vert)])
+    app.update()
+    assert len(GEOMETRY_CALLS) == 1
+    app._clear_files()
+    assert not app.geometry and not app.geometry_notified
+    app._merge_files([str(wide)])
+    app.update()
+    assert len(GEOMETRY_CALLS) == 2
+    print("[10c] 同一照片不重复弹窗；清空列表后状态复位")
+
+    # 真实窗口：非模态（无 grab_set）、正文与纯文本文案一致
+    win = REAL_SHOW_GEOMETRY(app, issues)
+    app.update()
+    assert isinstance(win, tk.Toplevel)
+    assert win.grab_current() is None, "提示窗口不得为模态，否则会阻断其余照片导入"
+    texts = []
+
+    def collect(widget: tk.Misc) -> None:
+        for child in widget.winfo_children():
+            if isinstance(child, tk.Text):
+                texts.append(child.get("1.0", "end"))
+            collect(child)
+
+    collect(win)
+    assert texts and "目标要求：符合 4:3 的横版照片" in texts[0]
+    btn_texts: list[str] = []
+
+    def collect_buttons(widget: tk.Misc) -> None:
+        for child in widget.winfo_children():
+            if child.winfo_class() == "TButton":
+                btn_texts.append(str(child.cget("text")))
+            collect_buttons(child)
+
+    collect_buttons(win)
+    assert "知道了" in btn_texts, btn_texts
+    win.destroy()
+    print("[10d] 真实提示窗口为非模态、正文与统一文案一致")
 
     app._on_close()
     print("\nGUI 冒烟测试全部通过")
