@@ -122,7 +122,7 @@ def _selftest(workdir: str) -> int:
                                    serial_number="SELFTEST")
         ck("strict_exif_policy",
            strict.time_source == "exif" and strict.missing_exif_policy == "fail"
-           and strict.resize_mode == "none", "")
+           and strict.resize_mode == "crop43", "")
         ck("exif_only_trigger", hasattr(engine, "has_exif_capture_time")
            and engine.has_exif_capture_time(p1)
            and not engine.has_exif_capture_time(p2), "")

@@ -72,7 +72,8 @@ ADVANCED_GROUPS: list[tuple[str, list[Field], str]] = [
         ("jpeg_quality", "JPEG 质量", "int", None, ""),
         ("min_output_megapixels", "主输出像素下限 (MP)", "int", None, ""),
         ("background", "留白背景色", "color", None, ""),
-    ], "客户规范 V1 p.3 / V2 §8·§10：交付成品必须 ≥2100 万像素。默认「不缩放」保持原分辨率，通常无需修改。"),
+    ], "客户规范 V1 p.3 / V2 §8·§10：成品必须 ≥2100 万像素且为 4:3 横版。"
+       "默认「居中裁边到 4:3」：只裁左右（约各 3.3%）、不缩放、不重采样，通常无需修改。"),
 
     ("输出与命名", [
         ("filename_template", "批量文件名模板", "editable", [t for t, _ in FILENAME_TEMPLATE_PRESETS], ""),

@@ -445,12 +445,48 @@ def resolve_output_format(cfg: RuleConfig, source: Path) -> tuple[str, str]:
 # --------------------------------------------------------------------------
 
 
-def _stage_resize(img: Image.Image, cfg: RuleConfig) -> Image.Image:
-    """尺寸调整：4 种模式均不改变证据内容的完整性（contain 为默认）。"""
+def _crop_to_4_3(img: Image.Image, notes: list[str] | None = None) -> Image.Image:
+    """居中裁边到 4:3 横版：不缩放、不重采样、不补边。
+
+    横版按长边裁到 4:3（通常裁左右两侧）；竖版/正方形无法仅靠裁边得到 4:3 横版，
+    为避免切掉主体，保持原样并给出警告，由操作人员旋转或更换源图。
+    """
+    w, h = img.size
+    if w <= h:
+        if notes is not None:
+            notes.append("该张为竖版/正方形，无法仅靠裁边得到 4:3 横版；"
+                         "已保持原样，请旋转或更换源图后重跑")
+        return img
+    tw = round(h * 4 / 3)
+    if tw == w:
+        return img
+    if tw < w:
+        left = (w - tw) // 2
+        right = w - tw - left
+        if notes is not None:
+            side = f"左右各裁 {left} px" if left == right else f"左裁 {left} px、右裁 {right} px"
+            notes.append(f"已居中裁边至 4:3：{w}×{h} → {tw}×{h}"
+                         f"（{side}，合计占宽度 {(w - tw) / w * 100:.2f}%）")
+        return img.crop((left, 0, left + tw, h))
+    th = round(w * 3 / 4)
+    top = (h - th) // 2
+    bottom = h - th - top
+    if notes is not None:
+        side = f"上下各裁 {top} px" if top == bottom else f"上裁 {top} px、下裁 {bottom} px"
+        notes.append(f"已居中裁边至 4:3：{w}×{h} → {w}×{th}"
+                     f"（{side}，合计占高度 {(h - th) / h * 100:.2f}%）")
+    return img.crop((0, top, w, top + th))
+
+
+def _stage_resize(img: Image.Image, cfg: RuleConfig,
+                  notes: list[str] | None = None) -> Image.Image:
+    """尺寸调整：crop43（默认）居中裁边到 4:3；其余模式按目标尺寸缩放。"""
     if img.mode != "RGB":
         rgba = img.convert("RGBA")
         bg = Image.new("RGBA", rgba.size, hex_to_rgb(cfg.background) + (255,))
         img = Image.alpha_composite(bg, rgba).convert("RGB")
+    if cfg.resize_mode == "crop43":
+        return _crop_to_4_3(img, notes)
     if cfg.resize_mode == "none":
         return img
     target = (cfg.target_width, cfg.target_height)
@@ -737,7 +773,7 @@ def process_one(source: str | Path, cfg: RuleConfig, seq: int,
 
         # --- 阶段 3：尺寸与像素规格调整 ---
         try:
-            image = _stage_resize(oriented, cfg)
+            image = _stage_resize(oriented, cfg, r.warnings)
         except (ValueError, MemoryError, OSError) as exc:
             return abort(STAGE_RESIZE, f"尺寸调整失败：{exc}")
         del oriented
@@ -810,7 +846,8 @@ def process_one(source: str | Path, cfg: RuleConfig, seq: int,
                 r.warnings.append(copy_err)
 
         downgrade = ("缺失 EXIF", "非 EXIF", "未执行输出回读校验", "未写入 EXIF",
-                     "自动缩小", "回退到", "不足", "报告版导出失败", "报告版校验失败")
+                     "自动缩小", "回退到", "不足", "报告版导出失败", "报告版校验失败",
+                     "无法仅靠裁边")
         r.status = STATUS_WARNING if any(
             any(k in w for k in downgrade) for w in r.warnings) else STATUS_SUCCESS
         return r

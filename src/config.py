@@ -25,10 +25,11 @@ SUPPORTED_INPUT_EXTS = {
 }
 
 RESIZE_MODES = {
+    "crop43": "居中裁边到 4:3（不缩放、不重采样，默认）",
     "contain": "适应留白（不裁切、不变形）",
-    "cover": "填充裁切（铺满、裁掉边缘）",
+    "cover": "填充裁切（缩放到目标尺寸后居中裁切）",
     "stretch": "拉伸至目标尺寸（可能变形）",
-    "none": "不缩放（保持原尺寸）",
+    "none": "不缩放（保持原尺寸，可能非 4:3）",
 }
 
 OUTPUT_FORMATS = {
@@ -141,7 +142,9 @@ class RuleConfig:
     # 交付成品必须满足。故默认「不缩放」以保持原分辨率（真实照片实测 50.3 MP）。
     target_width: int = 5292                 # 仅在自定义缩放 / 报告版副本时使用
     target_height: int = 3969                # 4:3，约 2100 万像素
-    resize_mode: str = "none"
+    # crop43：居中裁边到 4:3（不缩放、不重采样）。客户要求「符合 4:3 的横版照片」，
+    # 真实照片为 8768×6144（1.43:1），居中裁宽到 8192×6144 即可，高度零损失、每侧约 3.3%。
+    resize_mode: str = "crop43"
     background: str = "#FFFFFF"
     dpi: int = 300
     output_format: str = "同原格式"
@@ -263,7 +266,8 @@ class RuleConfig:
         e: list[str] = []
         if self.resize_mode not in RESIZE_MODES:
             e.append(f"缩放方式非法：{self.resize_mode}")
-        if self.resize_mode != "none":
+        # crop43 / none 的输出尺寸由源图决定，目标宽高不参与；只有显式缩放才校验目标尺寸
+        if self.resize_mode in ("contain", "cover", "stretch"):
             if not 16 <= self.target_width <= 20000:
                 e.append("目标宽度须在 16–20000 px 之间")
             if not 16 <= self.target_height <= 20000:
@@ -274,7 +278,7 @@ class RuleConfig:
             if mp < self.min_output_megapixels:
                 e.append(f"目标尺寸 {self.target_width}×{self.target_height} = {mp:.2f} MP，"
                          f"低于客户要求 {self.min_output_megapixels:g} MP（≥2100 万像素）；"
-                         "请改用「不缩放」或增大目标尺寸")
+                         "请改用「居中裁边到 4:3」或增大目标尺寸")
         if not 0 <= self.min_output_megapixels <= 500:
             e.append("输出像素下限须在 0–500 MP 之间")
         if re.search(r'[\\/:*?"<>|]', self.report_copy_suffix):
@@ -461,14 +465,14 @@ def resolve_font(font_family: str, explicit_path: str = "") -> str:
 
 # 预置方案只覆盖非水印项（时间水印为系统固定规格，任何预置都不得改动）
 PRESETS: dict[str, dict[str, Any]] = {
-    "客户合规 · 保持原分辨率 + 合规命名（默认）": {
+    "客户合规 · 居中裁边到 4:3 + 合规命名（默认）": {
         # 与 RuleConfig() 默认值逐项一致，避免「启动默认」与「恢复默认」行为不同
-        "resize_mode": "none", "dpi": 300, "output_format": "同原格式",
+        "resize_mode": "crop43", "dpi": 300, "output_format": "同原格式",
         "jpeg_quality": 92, "filename_template": "{ecu}_{serial}_{seq}",
         "min_output_megapixels": 21, "report_copy_enabled": False,
     },
     "合规 + 报告插图副本（原件 + 2400×1800）": {
-        "resize_mode": "none", "target_width": 2400, "target_height": 1800,
+        "resize_mode": "crop43", "target_width": 2400, "target_height": 1800,
         "dpi": 300, "output_format": "同原格式", "jpeg_quality": 95,
         "report_copy_enabled": True, "report_copy_suffix": "_报告版",
         "filename_template": "{ecu}_{serial}_{seq}", "min_output_megapixels": 21,
@@ -509,6 +513,20 @@ def app_base_dir() -> Path:
 
 
 def rules_dir() -> Path:
+    """规则持久化目录。
+
+    支持 PW_RULES_DIR 环境变量覆盖：自动化测试必须指向独立目录，
+    否则会把测试用的配置（如 resize_mode/min_output_megapixels）写进真实启动配置，
+    下次启动被 load_last_used() 读回，造成"合规门槛被悄悄关掉"的现场事故。
+    """
+    override = os.environ.get("PW_RULES_DIR", "").strip()
+    if override:
+        p = Path(override)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return p
     p = app_base_dir() / "rules"
     try:
         p.mkdir(parents=True, exist_ok=True)
