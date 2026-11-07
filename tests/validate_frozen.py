@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import re
 import subprocess
 import sys
@@ -154,6 +155,7 @@ def main() -> int:
                        "guard_naming_required", "strict_exif_policy",
                        "compliant_output_name", "exif_only_trigger", "notice_clean",
                        "no_source_diagnostics", "precheck_uses_uniform_text",
+                       "compliance_locked", "compliance_fields_declared",
                        "watermark_font_tripled", "watermark_ink_auto",
                        "watermark_light_bg_dark_ink", "watermark_dark_bg_light_ink",
                        "watermark_contrast_ok",
@@ -165,7 +167,9 @@ def main() -> int:
                item.get("detail", "缺失"))
 
         # --- [3] 双击无参数启动：实测顶层窗口 ---
-        proc = subprocess.Popen([str(EXE)], cwd=str(work),
+        # 启动配置写到独立目录，避免验收把 ECU/序列号/输出目录写进交付目录
+        gui_env = {**os.environ, "PW_RULES_DIR": str(work / "_gui_rules")}
+        proc = subprocess.Popen([str(EXE)], cwd=str(work), env=gui_env,
                                 stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         found: list[tuple[int, int, str, str]] = []
@@ -199,6 +203,8 @@ def main() -> int:
         ck("4.1 临时 cwd 下未误建 rules/ 或 输出照片/",
            not (work / "rules").exists() and not (work / "输出照片").exists(),
            str(work))
+        ck("4.2 交付目录不含 rules/（启动配置不随包分发）",
+           not (EXE.parent / "rules").exists(), str(EXE.parent / "rules"))
 
     print("\n" + "=" * 68)
     print(f"冻结产物验收：通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

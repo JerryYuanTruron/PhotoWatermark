@@ -20,3 +20,6 @@ dist/*
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# 交付前归档（旧版本成品/试跑产物），不入库
+_archive/

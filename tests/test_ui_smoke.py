@@ -12,6 +12,7 @@ import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox
+from unittest import mock
 
 from PIL import Image
 
@@ -110,14 +111,30 @@ def main() -> int:
     assert d.output_dir == str(out) and d.ecu_name == "EEPH"
     print("[3] 恢复默认只作用于高级设置，必填信息与输出目录保持不变")
 
-    # 切回合成小图的测试基线（v1.1.0 默认是不缩放 + ≥21MP + 合规命名）
+    # B1–B3：合规口径三项只读——界面无输入控件、不写入 vars；
+    # 即使把一份「放宽」的配置塞进界面，收集时也会被强制回固定值。
+    for k in config.COMPLIANCE_LOCKED_FIELDS:
+        assert k not in app.vars, f"{k} 不应是可编辑字段"
+        assert k in app.widgets, f"{k} 应只读展示"
+    rogue = config.RuleConfig(min_output_megapixels=0, resize_mode="contain",
+                              filename_template="{name}_结果", output_dir=str(out))
+    app._apply_config(rogue)
+    locked = app._collect_config()
+    assert (locked.min_output_megapixels, locked.resize_mode,
+            locked.filename_template) == (21, "crop43", "{ecu}_{serial}_{seq}"), (
+        locked.min_output_megapixels, locked.resize_mode, locked.filename_template)
+    print("[3b] 合规口径只读：界面无输入项，塞入放宽配置仍被强制回 21MP / crop43 / 合规命名")
+
+    # 切回合成小图的测试基线：只通过测试补丁放宽合规常量（操作人员无此路径）
     app.vars["ecu_name"].set("EEPH")
     app.vars["serial_number"].set("TESTSERIAL")
-    app.vars["min_output_megapixels"].set("0")
     app.vars["target_width"].set("2400")
     app.vars["target_height"].set("1800")
-    app.vars["filename_template"].set("{name}_结果")
-    app.widgets["resize_mode"].set_value("contain")
+    compliance = mock.patch.dict(config.COMPLIANCE_FIXED,
+                                 {"min_output_megapixels": 0,
+                                  "filename_template": "{name}_结果",
+                                  "resize_mode": "contain"})
+    compliance.start()
 
     # 仅导入含 EXIF 的照片：不得触发提示窗口
     good_only = [p for p in samples if engine.has_exif_capture_time(p)]
@@ -205,8 +222,9 @@ def main() -> int:
     vert = geo_sample("VERT_34.jpg", 900, 1200)
     wide = geo_sample("WIDE_169.jpg", 1600, 900)
     app._clear_files()
-    # 用默认的 crop43 口径验证文案：横版会被自动裁边，不应出现「请自行处理」的说法
-    app.widgets["resize_mode"].set_value("crop43")
+    # 用 crop43 口径验证文案：横版会被自动裁边，不应出现「请自行处理」的说法
+    crop_ctx = mock.patch.dict(config.COMPLIANCE_FIXED, {"resize_mode": "crop43"})
+    crop_ctx.start()
     GEOMETRY_CALLS.clear()
     POPUPS.clear()
     app._merge_files([str(ok43)])
@@ -272,6 +290,7 @@ def main() -> int:
     assert "知道了" in btn_texts, btn_texts
     win.destroy()
     print("[10d] 真实提示窗口为非模态、正文与统一文案一致")
+    crop_ctx.stop()
 
     # --- [11] 同名覆盖防护：默认不覆盖 + 开始前统计并提示 ---
     dup_out = out / "dup"
@@ -279,8 +298,6 @@ def main() -> int:
     app.vars["ecu_name"].set("EEPH")
     app.vars["serial_number"].set("DUP")
     app.vars["output_dir"].set(str(dup_out))
-    app.vars["filename_template"].set("{ecu}_{serial}_{seq}")
-    app.widgets["resize_mode"].set_value("contain")
     app.update()
     cfg_dup = app._collect_config()
     assert cfg_dup.on_exists == "rename", cfg_dup.on_exists
@@ -306,6 +323,7 @@ def main() -> int:
     assert ASKS and "覆盖" in ASKS[-1][0] and "不可恢复" in ASKS[-1][1], ASKS
     print("[11] 同名覆盖防护：默认不覆盖并提示；显式覆盖时二次确认")
 
+    compliance.stop()
     app._on_close()
     print("\nGUI 冒烟测试全部通过")
     return 0

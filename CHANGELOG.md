@@ -5,6 +5,48 @@
 
 ---
 
+## [1.5.0] - 2026-11-07
+
+交付前问题清单中的 A1′、A2′、B1–B3、C2、C3 六项集中处理。
+
+### 交付目录（A1′ / A2′）
+
+- **A1′ 启动配置不再随包分发**：`dist/rules/last_used.json` 曾被写回真实值
+  （`ecu_name=EEPH`、`serial_number=012301230123`、输出目录指向 `dist\输出照片`）。
+  本次删除该文件，并从三处根治：
+  1. `build.py` 打包后自动清除 `dist/rules`，并在 `输出照片` 非空时打印分发警告；
+  2. `tests/validate_frozen.py` 启动 GUI 时注入 `PW_RULES_DIR`（临时目录），
+     验收不再把配置写进交付目录；
+  3. 新增验收断言 `4.2 交付目录不含 rules/`。
+- **A2′ 旧成品移出交付目录**：`dist\输出照片` 的 26 张 v1.3.0 试跑成品（70 px 白字、
+  占位序列号 `1234567890`，159.6 MB）已移动到 `_archive/v1.3.0_输出照片_20261107/`
+  ——**未删除**，可随时取回；`dist` 现仅 `PhotoWatermark.exe` + `BUILD_INFO.txt`。
+
+### 合规口径只读（B1 / B2 / B3）
+
+- 新增 `config.COMPLIANCE_FIXED`（3 项）与 `RuleConfig.apply_compliance_lock()`：
+  `resize_mode=crop43`、`min_output_megapixels=21`、`filename_template={ecu}_{serial}_{seq}`。
+- 界面「高级设置」中这三项改为 **`locked` 只读标签**（不创建输入控件、不写入 `self.vars`），
+  并单独成组「合规口径（系统固定 · 只读）」；`_collect_config()` 末尾强制回写，
+  即使有人把放宽的配置塞进界面，收集时也会恢复固定值。
+- 规则文件载入路径同样无法改写（只回填可编辑字段）。
+- 边界：**引擎 API 仍接受传参**（`RuleConfig(min_output_megapixels=0)`），供自动化测试与内部批处理；
+  操作人员的界面/规则文件路径已封死，如需变更必须改常量并发版。
+
+### 磁盘与试跑产物（C2 / C3）
+
+- 清除测试/构建遗留：`_test_runs`（1274 文件 / 321.8 MB）、`build`（84 文件 / 221.1 MB）、
+  `_test_out_ui`（178 文件 / 33.1 MB）、`_real_audit`（33 文件 / 173.3 MB）、
+  `_real_v12_out`、`_real_crop43*`、`_test_rules`、历次 `_st*` 自检目录与散落日志，
+  合计释放约 **800 MB**。
+- `_archive/` 已加入 `.gitignore`；`_crop_demo/` 保留水印对比图，`_test_samples` 可随时重建。
+
+### 验证
+
+- 核心 134/134（未改动引擎判定）、GUI 17 个检查点（新增 `[3b] 合规口径只读`）、
+  源码自检 39/39（新增 `compliance_locked`、`compliance_fields_declared`）、
+  冻结产物验收新增 `4.2 交付目录不含 rules/`。
+
 ## [1.4.0] - 2026-11-07
 
 需求：水印字号至少放大到当前的三倍；颜色按每张照片背景自动调整、不再固定白色，

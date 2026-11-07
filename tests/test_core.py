@@ -255,15 +255,16 @@ def main() -> int:
     check("E11 自定义字体不可配置：仍用系统固定字体成功输出",
           rr.ok and cfg.font_path == "" and cfg.font_family == "微软雅黑", str(rr.reason))
 
-    # 模拟输出校验失败，验证残留成品被清理
-    cfg = C(output_dir=str(fresh("verify_fail")))
+    # 模拟输出校验失败，验证残留成品被清理（断言必须落在本次真实输出目录上）
+    vf_dir = fresh("verify_fail")
+    cfg = C(output_dir=str(vf_dir))
     with mock.patch.object(engine, "_verify_output",
                            return_value=(False, "模拟校验失败", (0, 0), None)):
         rr = run([good], cfg)[0]
     check("E12 校验失败 → 失败状态 + 清理输出文件",
           rr.status == engine.STATUS_FAILED and rr.stage == engine.STAGE_VERIFY
-          and not list((ROOT / "_test_runs" / "verify_fail").glob("*.jpg")),
-          f"{rr.status} {rr.reason}")
+          and not list(vf_dir.glob("*.jpg")) and not list(vf_dir.glob("._pw_*")),
+          f"{rr.status} {rr.reason} {[x.name for x in vf_dir.iterdir()]}")
 
     # ------------------------------------------------------------------
     print("\n[F] 输出命名与同名策略")
@@ -287,12 +288,14 @@ def main() -> int:
     second = run([good], C(output_dir=str(dup), on_exists="skip",
                                            filename_template="{name}_结果"))
     check("F5 同名策略 skip 生效", second[0].status == engine.STATUS_SKIPPED)
-    cfg2 = C(output_dir=str(fresh("rename")), on_exists="rename",
+    rename_dir = fresh("rename")
+    cfg2 = C(output_dir=str(rename_dir), on_exists="rename",
                              filename_template="{name}")
     run([good], cfg2)
     run([good], cfg2)
     check("F6 同名策略 rename 生效",
-          len(list((ROOT / "_test_runs" / "rename").glob("*.jpg"))) == 2)
+          len(list(rename_dir.glob("*.jpg"))) == 2,
+          [x.name for x in rename_dir.glob("*.jpg")])
 
     # ------------------------------------------------------------------
     print("\n[G] 报告、批次审计与一致性")
