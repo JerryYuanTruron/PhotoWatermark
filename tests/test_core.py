@@ -273,7 +273,7 @@ def main() -> int:
     check("F1 {name} 保持原名（不追加 _结果 后缀）",
           Path(rr.output_path).stem == "PeCu_2718281828_0001", Path(rr.output_path).name)
     cfg = C(output_dir=str(fresh("seqname")), filename_template="{seq}_{name}")
-    check("F2 序号模板生效", Path(run([good], cfg)[0].output_path).name.startswith("0001_"))
+    check("F2 序号模板生效", Path(run([good], cfg)[0].output_path).name.startswith("001_"))
     cfg = C(output_dir=str(fresh("illegal")),
                             filename_template=r'{name}:*?_结果')
     rr = run([good], cfg)[0]
@@ -490,20 +490,20 @@ def main() -> int:
                  ecu_name="EEPH", serial_number=full_no, start_index=7)
     rn = run([good], cfg_name)[0]
     check("J6 合规命名生成 <ECU>_<完整样品编号>_<四位序号>",
-          rn.ok and Path(rn.output_path).name == f"EEPH_{full_no}_0007.jpg",
+          rn.ok and Path(rn.output_path).name == f"EEPH_{full_no}_007.jpg",
           Path(rn.output_path).name if rn.output_path else "")
     # 样品编号必须原样进入文件名：B118X/B119X 段既不能丢、也不能被挪到串首/串尾
     stem = Path(rn.output_path).stem if rn.output_path else ""
     check("J6b 编号原样保留（B 段在串内原位、未截断未重排）",
-          stem == f"EEPH_{full_no}_0007"
+          stem == f"EEPH_{full_no}_007"
           and full_no in stem
           and stem.index("B118X") > stem.index("T55B92BD20126")
-          and stem.endswith("0000119461114_0007"), stem)
+          and stem.endswith("0000119461114_007"), stem)
     cfg_119 = C(output_dir=str(fresh("naming119")), filename_template="{ecu}_{serial}_{seq}",
                 ecu_name="EEPH", serial_number=full_no_119, start_index=1)
     r119 = run([good], cfg_119)[0]
     check("J6c 另一批样品（B119X）同样按其完整编号命名",
-          r119.ok and Path(r119.output_path).name == f"EEPH_{full_no_119}_0001.jpg",
+          r119.ok and Path(r119.output_path).name == f"EEPH_{full_no_119}_001.jpg",
           Path(r119.output_path).name if r119.output_path else "")
     check("J7 命名 token 未留字面量占位符",
           "{" not in Path(rn.output_path).name, rn.output_path)
@@ -834,6 +834,44 @@ def main() -> int:
     _, hi_d = glyph_extremes(dark.output_path, dark.watermark_rect or (0, 0, 1, 1))
     check("N11 浅色底成品含近黑字形", lo_l <= 40, str(lo_l))
     check("N12 深色底成品含近白字形", hi_d >= 215, str(hi_d))
+
+    # ------------------------------------------------------------------
+    print("\n[O] 三位序号：递增、整十/整百边界与上限")
+    def seqs(names: list[str]) -> list[str]:
+        return [re.search(r"_(\d+)\.jpg$", n).group(1) for n in names]
+
+    def seq_run(start: int, n: int) -> tuple[list[str], list]:
+        out = fresh(f"seq_{start}_{n}")
+        cfg = C(output_dir=str(out), start_index=start,
+                filename_template="{ecu}_{serial}_{seq}")
+        rs = run([good] * n, cfg)
+        return [Path(r.output_path).name for r in rs if r.output_path], rs
+
+    n1, _ = seq_run(1, 2)
+    check("O1 从 001 起、固定三位", seqs(n1) == ["001", "002"], seqs(n1))
+    n2, _ = seq_run(9, 3)
+    check("O2 跨整十：009 → 010 → 011", seqs(n2) == ["009", "010", "011"], seqs(n2))
+    n3, _ = seq_run(99, 3)
+    check("O3 跨整百：099 → 100 → 101", seqs(n3) == ["099", "100", "101"], seqs(n3))
+    n4, _ = seq_run(999, 1)
+    check("O4 上限 999 仍为三位", seqs(n4) == ["999"], seqs(n4))
+    n5, _ = seq_run(95, 10)
+    check("O5 连续 10 张无重复无缺失", seqs(n5) == [f"{i:03d}" for i in range(95, 105)], seqs(n5))
+    check("O6 全部输出名均为三位序号",
+          all(re.search(r"_\d{3}\.jpg$", n) for n in n1 + n2 + n3 + n4 + n5), "")
+    check("O7 起始序号 1000 被配置校验拦截",
+          any("起始序号" in e for e in C(output_dir=str(fresh("seq_bad")),
+                                        start_index=1000).validate()), "")
+    _, over = seq_run(999, 2)
+    check("O8 越界张判失败（命名阶段、无成品）",
+          over[0].ok and over[1].status == engine.STATUS_FAILED
+          and over[1].stage == engine.STAGE_NAMING
+          and "超出三位上限" in over[1].reason and not over[1].output_path,
+          f"{over[1].status} {over[1].stage} {over[1].reason[:60]}")
+    over_dir = Path(over[0].output_path).parent
+    check("O9 越界批次不产生 4 位序号文件",
+          not list(over_dir.glob("*_[0-9][0-9][0-9][0-9].jpg")), 
+          [p.name for p in over_dir.glob("*.jpg")])
 
     # ------------------------------------------------------------------
     print("\n" + "=" * 68)

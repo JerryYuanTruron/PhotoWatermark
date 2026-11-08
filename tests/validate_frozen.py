@@ -156,6 +156,7 @@ def main() -> int:
                        "compliant_output_name", "exif_only_trigger", "notice_clean",
                        "no_source_diagnostics", "precheck_uses_uniform_text",
                        "compliance_locked", "compliance_fields_declared", "serial_verbatim_naming",
+                       "seq_three_digits",
                        "watermark_font_tripled", "watermark_ink_auto",
                        "watermark_light_bg_dark_ink", "watermark_dark_bg_light_ink",
                        "watermark_contrast_ok",
