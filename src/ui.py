@@ -20,6 +20,8 @@ from PIL import Image  # noqa: F401  (确保打包时 PIL 被收集)
 from . import __app_name__, __spec_source__, __version__
 from .config import (
     COMPLIANCE_FIXED,
+    SEQ_HINT,
+    SEQ_MAX,
     SERIAL_HINT,
     SERIAL_MARK_RE,
     SERIAL_MIN_LEN,
@@ -72,7 +74,7 @@ ADVANCED_GROUPS: list[tuple[str, list[Field], str]] = [
         ("resize_mode", "缩放方式", "locked", None, ""),
         ("min_output_megapixels", "主输出像素下限", "locked", None, ""),
         ("filename_template", "批量文件名模板", "locked", None, ""),
-    ], "客户规范 V1 p.3 / V2 §8·§10·§11：成品须 ≥2100 万像素、4:3 横版、按 <ECU 名称>_<序列号>_<四位序号> 命名。"
+    ], "客户规范 V1 p.3 / V2 §8·§10·§11：成品须 ≥2100 万像素、4:3 横版、按 <ECU 名称>_<序列号>_<三位序号> 命名（001–999）。"
        "这三项由系统固定、界面不可修改；如需变更须改代码并发布新版本。"),
 
     ("输出规格", [
@@ -90,7 +92,7 @@ ADVANCED_GROUPS: list[tuple[str, list[Field], str]] = [
         ("keep_metadata", "保留 EXIF 元数据", "bool", None, ""),
         ("report_copy_enabled", "另出报告插图副本", "bool", None, ""),
         ("report_copy_suffix", "报告版文件名后缀", "text", None, ""),
-    ], "命名默认 <ECU 名称>_<序列号>_<四位序号>（V1 p.3 / V2 §11）；报告插图副本不满足 2100 万像素，不可替代主交付原件。"),
+    ], "命名默认 <ECU 名称>_<序列号>_<三位序号>（001–999，V1 p.3 / V2 §11）；报告插图副本不满足 2100 万像素，不可替代主交付原件。"),
 
     ("输出校验", [
         ("verify_output", "输出后回读校验", "bool", None, ""),
@@ -285,7 +287,7 @@ class App(tk.Tk):
         self._required_field(row1, "ecu_name", "★ ECU 名称", 26)
         self._required_field(row1, "serial_number", "★ 样品编号（完整串）", 30)
         self._required_field(row1, "output_dir", "★ 输出目录", 46, browse=True)
-        ttk.Label(row1, text="起始序号").pack(side="left", padx=(10, 3))
+        ttk.Label(row1, text=f"起始序号(1–{SEQ_MAX})").pack(side="left", padx=(10, 3))
         var = tk.StringVar()
         self.vars["start_index"] = var
         self.widgets["start_index"] = ttk.Entry(row1, textvariable=var, width=6)
@@ -867,6 +869,17 @@ class App(tk.Tk):
             return
         if not self.files:
             messagebox.showinfo("请先导入照片", "请点击「① 导入照片」或「① 导入文件夹」批量导入后再开始。")
+            return
+        # 三位序号上限：越界会产出 4 位文件名（格式不一致），必须在开跑前拦住
+        last_seq = cfg.start_index + len(self.files) - 1
+        if last_seq > SEQ_MAX:
+            messagebox.showerror(
+                "序号将超出三位上限",
+                f"本批共 {len(self.files)} 张，起始序号 {cfg.start_index}，"
+                f"最后一个序号将是 {last_seq}，超过三位上限 {SEQ_MAX}。\n\n"
+                f"继续会产生 4 位序号、破坏命名一致性，因此已阻止开始。\n"
+                f"请拆成多批（当前起始序号下每批最多 {SEQ_MAX - cfg.start_index + 1} 张），"
+                "或把起始序号调小后重试。")
             return
         # 处理前再按同一纯 EXIF 条件复核一次（已弹窗提示过的不会重复弹出），
         # 保证任何入口下缺 EXIF 都不会被静默跳过。

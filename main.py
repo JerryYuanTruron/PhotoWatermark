@@ -112,11 +112,16 @@ def _selftest(workdir: str) -> int:
         rogue = config.RuleConfig(output_dir=str(out), min_output_megapixels=0,
                                   resize_mode="contain", filename_template="{name}_结果")
         locked_cfg = rogue.apply_compliance_lock()
+        ck("seq_three_digits",
+           engine.plan_output_names([str(p1)], config.RuleConfig(
+               output_dir=str(out), ecu_name="EEPH",
+               serial_number=config.SERIAL_FULL_EXAMPLE, start_index=9))[0].name
+           .endswith("_009.jpg"), "start_index=9")
         ck("serial_verbatim_naming",
            engine.plan_output_names([str(p1)], config.RuleConfig(
                output_dir=str(out), ecu_name="EEPH",
                serial_number=config.SERIAL_FULL_EXAMPLE))[0].name
-           == f"EEPH_{config.SERIAL_FULL_EXAMPLE}_0001.jpg",
+           == f"EEPH_{config.SERIAL_FULL_EXAMPLE}_001.jpg",
            config.SERIAL_FULL_EXAMPLE)
         ck("compliance_locked",
            locked_cfg.min_output_megapixels == 21
@@ -260,7 +265,7 @@ def _selftest(workdir: str) -> int:
            all(x.attempted_output for x in rs if x.ok),
            [x.attempted_output for x in rs if x.ok])
         ck("compliant_output_name",
-           bool(produced) and produced[0].name == "EEPH_SELFTEST_0001.jpg",
+           bool(produced) and produced[0].name == "EEPH_SELFTEST_001.jpg",
            [x.name for x in produced])
         if produced:
             with Image.open(produced[0]) as im:

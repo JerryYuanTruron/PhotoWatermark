@@ -22,6 +22,9 @@ from PIL import (Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps,
 
 from .config import (
     POSITIONS,
+    SEQ_DIGITS,
+    SEQ_HINT,
+    SEQ_MAX,
     SUPPORTED_INPUT_EXTS,
     RuleConfig,
     list_system_fonts,
@@ -43,6 +46,7 @@ STAGE_RESIZE = "尺寸调整"
 STAGE_WATERMARK = "水印渲染"
 STAGE_EXPORT = "导出"
 STAGE_VERIFY = "输出校验"
+STAGE_NAMING = "命名"
 
 # 文档 3.6「拍摄日期」：EXIF 优先级 DateTimeOriginal > DateTimeDigitized > DateTime
 EXIF_IFD_EXIF = 0x8769
@@ -367,9 +371,10 @@ def geometry_notice_text(issues: list[GeometryIssue], crop43_enabled: bool = Tru
 
 def format_content(template: str, time_text: str, stem: str, seq: int,
                    extra: dict[str, str] | None = None) -> str:
-    # {name}/{filename} 原文件名；{time} 时间文本；{seq} 四位序号(V1 示例 0001)
+    # {name}/{filename} 原文件名；{time} 时间文本；{seq} 三位序号（001…999）
     # {ecu}/{serial} 由操作人员填写，程序不预填
-    tokens = {"time": time_text, "filename": stem, "name": stem, "seq": f"{seq:04d}"}
+    tokens = {"time": time_text, "filename": stem, "name": stem,
+              "seq": f"{seq:0{SEQ_DIGITS}d}"}
     if extra:
         tokens.update(extra)
     out = template
@@ -820,6 +825,13 @@ def process_one(source: str | Path, cfg: RuleConfig, seq: int,
         return _fail(r, stage, reason)
 
     try:
+        # --- 阶段 0：序号范围（三位固定宽，越界放行会产出 4 位文件名） ---
+        seq_no = cfg.start_index + seq - 1
+        if seq_no > SEQ_MAX:
+            return abort(STAGE_NAMING,
+                         f"导出序号 {seq_no} 超出三位上限 {SEQ_MAX}"
+                         f"（起始序号 {cfg.start_index} + 第 {seq} 张）；请分批处理或调小起始序号")
+
         # --- 阶段 1：导入解码（文档 3.3） ---
         if not src.exists():
             return abort(STAGE_IMPORT, "文件不存在或已被移动")
