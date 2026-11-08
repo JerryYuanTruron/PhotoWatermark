@@ -1,0 +1,32 @@
+# 统一换行与二进制判定，避免 Windows/Linux 协作时产生整文件 diff
+* text=auto
+
+# 脚本与源码按各自平台惯例
+*.py    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.toml  text eol=lf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+*.sh    text eol=lf
+
+# 二进制：不做换行转换、不做文本 diff
+*.exe   binary
+*.dll   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.bmp   binary
+*.tif   binary
+*.tiff  binary
+*.ttf   binary
+*.ttc   binary
+*.ico   binary
+
+# 构建档案与压缩产物
+*.zip   binary
+*.7z    binary
